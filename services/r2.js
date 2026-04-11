@@ -17,7 +17,7 @@ const r2 = new S3Client({
     },
 });
 
-const BUCKET      = 'baddel-images';
+const BUCKET      = 'baddel-media';
 const PUBLIC_BASE = process.env.Public_Development_URL; // e.g. https://pub-xxx.r2.dev
 
 /**
