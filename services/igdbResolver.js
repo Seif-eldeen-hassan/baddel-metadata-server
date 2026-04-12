@@ -2,11 +2,6 @@
 
 /**
  * services/igdbResolver.js
- *
- * Handles all IGDB API interactions:
- *  1. Token management (client_credentials via Twitch)
- *  2. Lookup IGDB game ID from external platform ID (Steam / Epic)
- *  3. Fetch full game data: metadata, ratings, system requirements, images
  */
 
 // ─── Token Cache ──────────────────────────────────────────────────────────────
@@ -52,54 +47,47 @@ async function igdbFetch(endpoint, body) {
     return res.json();
 }
 
-// ─── Category map (external_games.category → platform uid meaning) ────────────
-// category=1  → Steam
-// category=26 → Epic Game Store
-const IGDB_EXTERNAL_CATEGORY = {
-    steam: 1,
-    epic:  26,
-};
+// ─── 1. Resolve IGDB game ID ──────────────────────────────────────────────────
 
-// ─── 1. Resolve IGDB game ID from external ID ─────────────────────────────────
+async function resolveIgdbIdForSteam(steamAppId) {
+    // Filter /games directly by nested external_games fields
+    const query = `fields id,name,slug; where external_games.uid="${steamAppId}" & external_games.category=1; limit 1;`;
+    console.log(`[IGDB] games query (steam):`, query);
 
-/**
- * Given a Steam appId or Epic catalogNamespace, return the IGDB game ID.
- * Uses the `external_games` endpoint.
- *
- * @param {'steam'|'epic'} platform
- * @param {string}         externalId  - Steam appId or Epic catalog namespace
- * @returns {Promise<number|null>}
- */
-async function resolveIgdbGameId(platform, externalId) {
-    const category = IGDB_EXTERNAL_CATEGORY[platform];
-    if (!category) return null;
+    let rows;
+    try {
+        rows = await igdbFetch('games', query);
+    } catch (err) {
+        console.error('[IGDB] games fetch error (steam):', err.message);
+        return null;
+    }
+    console.log(`[IGDB] games response (steam):`, JSON.stringify(rows));
+    return rows?.[0]?.id ?? null;
+}
 
-    // uid is stored as a string in IGDB (e.g. "292030")
-    // IGDB stores Steam UIDs as integers, try both quoted and unquoted
-    const query = `fields game,uid,name; where category=${category} & uid=${externalId}; limit 1;`;
-    console.log(`[IGDB] external_games query:`, query);
+async function resolveIgdbIdForEpic(namespace) {
+    const query = `fields game,uid,name; where category=26 & uid="${namespace}"; limit 1;`;
+    console.log(`[IGDB] external_games query (epic):`, query);
 
     let rows;
     try {
         rows = await igdbFetch('external_games', query);
     } catch (err) {
-        console.error('[IGDB] external_games fetch error:', err.message);
+        console.error('[IGDB] external_games fetch error (epic):', err.message);
         return null;
     }
-    console.log(`[IGDB] external_games response:`, JSON.stringify(rows));
-
+    console.log(`[IGDB] external_games response (epic):`, JSON.stringify(rows));
     return rows?.[0]?.game ?? null;
+}
+
+async function resolveIgdbGameId(platform, externalId) {
+    if (platform === 'steam') return resolveIgdbIdForSteam(externalId);
+    if (platform === 'epic')  return resolveIgdbIdForEpic(externalId);
+    return null;
 }
 
 // ─── 2. Full game data ────────────────────────────────────────────────────────
 
-/**
- * Fetch complete game record from IGDB by IGDB game ID.
- * Returns structured object ready for DB insertion.
- *
- * @param {number} igdbId
- * @returns {Promise<IgdbGameData|null>}
- */
 async function fetchIgdbGameData(igdbId) {
     const rows = await igdbFetch(
         'games',
@@ -125,54 +113,40 @@ async function fetchIgdbGameData(igdbId) {
     const g = rows?.[0];
     if (!g) return null;
 
-    // ── Normalise companies ──
-    const developers  = [];
-    const publishers  = [];
+    const developers = [];
+    const publishers = [];
     for (const ic of g.involved_companies || []) {
         const name = ic.company?.name;
         if (!name) continue;
-        if (ic.developer)  developers.push(name);
-        if (ic.publisher)  publishers.push(name);
+        if (ic.developer) developers.push(name);
+        if (ic.publisher) publishers.push(name);
     }
 
-    // ── Normalise genres / tags ──
-    const genres   = (g.genres   || []).map(x => x.name);
-    const tags     = [
+    const genres = (g.genres || []).map(x => x.name);
+    const tags   = [
         ...(g.themes   || []).map(x => x.name),
         ...(g.keywords || []).map(x => x.name),
     ];
 
-    // ── Normalise release year ──
     const releaseYear = g.first_release_date
         ? new Date(g.first_release_date * 1000).getFullYear()
         : null;
 
-    // ── Normalise images ──
-    // IGDB returns //images.igdb.com/... — prefix with https:
     const fixUrl = (u, size = 'cover_big') =>
         u ? 'https:' + u.replace(/\/t_[^/]+\//, `/t_${size}/`) : null;
 
     const cover = g.cover
-        ? {
-            url:    fixUrl(g.cover.url, '720p'),
-            width:  g.cover.width  || null,
-            height: g.cover.height || null,
-          }
+        ? { url: fixUrl(g.cover.url, '720p'), width: g.cover.width || null, height: g.cover.height || null }
         : null;
 
     const artworks = (g.artworks || []).map(a => ({
-        url:    fixUrl(a.url, '1080p'),
-        width:  a.width  || null,
-        height: a.height || null,
+        url: fixUrl(a.url, '1080p'), width: a.width || null, height: a.height || null,
     }));
 
     const screenshots = (g.screenshots || []).map(s => ({
-        url:    fixUrl(s.url, '1080p'),
-        width:  s.width  || null,
-        height: s.height || null,
+        url: fixUrl(s.url, '1080p'), width: s.width || null, height: s.height || null,
     }));
 
-    // ── Normalise videos ──
     const videos = (g.videos || []).map(v => ({
         url:   `https://www.youtube.com/watch?v=${v.video_id}`,
         thumb: `https://img.youtube.com/vi/${v.video_id}/hqdefault.jpg`,
@@ -181,11 +155,11 @@ async function fetchIgdbGameData(igdbId) {
 
     return {
         igdbId,
-        title:       g.name        || null,
-        slug:        g.slug        || null,
+        title:       g.name      || null,
+        slug:        g.slug      || null,
         releaseYear,
-        description: g.summary     || null,
-        storyline:   g.storyline   || null,
+        description: g.summary   || null,
+        storyline:   g.storyline || null,
         genres,
         tags,
         developer:   developers[0] || null,
@@ -200,19 +174,8 @@ async function fetchIgdbGameData(igdbId) {
     };
 }
 
-// ─── 3. System Requirements (Steam-only via IGDB) ─────────────────────────────
-// IGDB doesn't expose sys-req directly; Steam API remains the source of truth.
-// This is kept as a placeholder / future IGDB expansion point.
-
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Convenience: resolve IGDB ID then fetch full data in one call.
- *
- * @param {'steam'|'epic'} platform
- * @param {string}         externalId
- * @returns {Promise<{ igdbId: number, data: IgdbGameData }|null>}
- */
 async function resolveAndFetch(platform, externalId) {
     const igdbId = await resolveIgdbGameId(platform, externalId);
     if (!igdbId) return null;
