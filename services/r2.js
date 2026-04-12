@@ -8,6 +8,8 @@
 
 const { S3Client, PutObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const sharp = require('sharp'); 
+sharp.cache(false);     
+sharp.concurrency(1);
 
 const r2 = new S3Client({
     region: 'auto',
