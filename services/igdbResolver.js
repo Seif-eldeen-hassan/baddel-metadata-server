@@ -75,10 +75,17 @@ async function resolveIgdbGameId(platform, externalId) {
     if (!category) return null;
 
     // uid is stored as a string in IGDB (e.g. "292030")
-    const rows = await igdbFetch(
-        'external_games',
-        `fields game,uid,name; where category=${category} & uid="${externalId}"; limit 1;`
-    );
+    const query = `fields game,uid,name; where category=${category} & uid="${externalId}"; limit 1;`;
+    console.log(`[IGDB] external_games query:`, query);
+
+    let rows;
+    try {
+        rows = await igdbFetch('external_games', query);
+    } catch (err) {
+        console.error('[IGDB] external_games fetch error:', err.message);
+        return null;
+    }
+    console.log(`[IGDB] external_games response:`, JSON.stringify(rows));
 
     return rows?.[0]?.game ?? null;
 }
