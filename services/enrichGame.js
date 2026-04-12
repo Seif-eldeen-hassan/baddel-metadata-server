@@ -20,6 +20,7 @@ const db                    = require('../db');
 const { resolveAndFetch }   = require('./igdbResolver');
 const { resolveSgdbImages } = require('./steamGridDbResolver');
 const { uploadImageToR2, buildCoverKey } = require('./r2');
+const { resolveSysreq }             = require('./sysreqResolver');
 
 // ─── Image upload helper ──────────────────────────────────────────────────────
 
@@ -98,6 +99,27 @@ async function upsertVideos(gameId, videos) {
              VALUES ($1,'igdb','trailer',$2,$3,$4,$5)
              ON CONFLICT DO NOTHING`,
             [gameId, v.url, v.thumb || null, v.title || null, i]
+        );
+    }
+}
+
+async function upsertSysreq(gameId, rows) {
+    for (const r of rows) {
+        await db.query(
+            `INSERT INTO game_system_requirements
+                 (game_id, source, platform, tier, os_versions, cpu, gpu, ram, storage, directx, notes)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (game_id, source, platform, tier) DO UPDATE SET
+                 os_versions = EXCLUDED.os_versions,
+                 cpu         = EXCLUDED.cpu,
+                 gpu         = EXCLUDED.gpu,
+                 ram         = EXCLUDED.ram,
+                 storage     = EXCLUDED.storage,
+                 directx     = EXCLUDED.directx,
+                 notes       = EXCLUDED.notes,
+                 fetched_at  = now()`,
+            [gameId, r.source, r.platform, r.tier,
+             r.os_versions, r.cpu, r.gpu, r.ram, r.storage, r.directx, r.notes]
         );
     }
 }
@@ -205,6 +227,13 @@ async function enrichGame(gameId, platform, externalId) {
             upsertVideos(gameId, igdbData.videos || []),
             updateGameMeta(gameId, igdbData),
         ]);
+    }
+
+    // ── Step 8: System Requirements ───────────────────────────────────────────
+    const title = igdbData?.title || null;
+    const sysreqRows = await resolveSysreq({ platform, externalId, title });
+    if (sysreqRows.length) {
+        await upsertSysreq(gameId, sysreqRows);
     }
 
     console.log(
