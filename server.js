@@ -291,7 +291,7 @@ async function fetchAndSaveGames(pending) {
         } catch (err) {
             console.error(`[Cover] ❌ ${item.platform}:${item.id} —`, err.message);
         }
-        await delay(500);
+        await delay(1500);
     }
 }
 

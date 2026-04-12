@@ -429,7 +429,7 @@ async function enrichGames(items) {
         } catch (err) {
             console.error(`[Enrich] ❌ gameId=${item.gameId} —`, err.message);
         }
-        await delay(500);
+        await delay(1500);
     }
 }
 
