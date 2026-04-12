@@ -2,8 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const db      = require('./db');
-const { resolveSteamGame, resolveEpicGame } = require('./services/coverResolver');
-const { enrichGame, enrichGames }           = require('./services/enrichGame');
+const { resolveSteamGame, resolveEpicGame }   = require('./services/coverResolver');
+const { enrichGame, enrichGames }             = require('./services/enrichGame');
+const { buildCoverKey, uploadImageToR2 }      = require('./services/r2');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const app = express();
@@ -193,7 +194,6 @@ async function fetchAndSaveGames(pending) {
             }
 
             // ── 2. Build slug ─────────────────────────────────
-            // ── 2. Build slug ─────────────────────────────────
             const slugFromTitle = title
                 ? title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, '-')
                 : null;
@@ -240,7 +240,6 @@ async function fetchAndSaveGames(pending) {
             // with a higher sort_order and the client always picks sort_order ASC LIMIT 1.
             if (platform === 'epic' && hero_url) {
                 try {
-                    const { buildCoverKey, uploadImageToR2 } = require('./services/r2');
                     const heroKey    = buildCoverKey('epic_hero', id, hero_url);
                     const heroCdnUrl = await uploadImageToR2(hero_url, heroKey);
                     if (heroCdnUrl) {
@@ -346,12 +345,12 @@ app.post('/games/enrich/:gameId', async (req, res) => {
 
     if (background) {
         res.status(202).json({ status: 'accepted', message: 'Enrichment started in background', gameId });
-        enrichGame(gameId, platform, externalId).catch(err =>
+        enrichGame(gameId, platform, externalId, req.body).catch(err =>
             console.error('[Enrich] Background error:', err.message)
         );
     } else {
         try {
-            const result = await enrichGame(gameId, platform, externalId);
+            const result = await enrichGame(gameId, platform, externalId, req.body);
             res.status(200).json({ status: 'success', data: result });
         } catch (err) {
             res.status(500).json({ status: 'error', message: err.message });
