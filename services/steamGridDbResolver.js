@@ -3,19 +3,13 @@
 /**
  * services/steamGridDbResolver.js
  *
- * Fetches hero / cover / logo images from SteamGridDB.
- * Priority:  SteamGridDB → IGDB (handled by caller)
- *
- * SteamGridDB endpoints used:
- *   GET /grids/game/{gameId}   → covers  (600×900 portrait, "tall" style)
- *   GET /heroes/game/{gameId}  → heroes  (wide banner)
- *   GET /logos/game/{gameId}   → logos
- *
- * gameId here is the *SteamGridDB* game ID, resolved from a Steam appId
- * via:  GET /games/steam/{steamAppId}
- *
- * If we only have an IGDB ID (Epic games), we use:
- *       GET /games/igdb/{igdbId}
+ * Strategy for resolving SteamGridDB game ID:
+ *   1. By Steam appId        → /games/steam/:id
+ *   2. By Epic namespace     → /games/egs/:namespace
+ *   3. By IGDB ID            → /games/igdb/:igdbId
+ *   4. Fallback: name search → /search/autocomplete/:name
+ *      - strips colon suffix for episodic-safe retry
+ *      - uses scored candidate picking (exact > prefix > substring)
  */
 
 const SGDB_BASE = 'https://www.steamgriddb.com/api/v2';
@@ -30,97 +24,177 @@ async function sgdbFetch(path) {
         },
     });
 
-    if (res.status === 404) return null;          // game / images not found
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error(`SteamGridDB ${path} → HTTP ${res.status}`);
 
     const json = await res.json();
     return json?.success ? json : null;
 }
 
+// ─── Name utils ───────────────────────────────────────────────────────────────
+
+function normalizeTitle(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/['"®™©]/g, '')
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function isEpisodicTitle(name) {
+    return /\bep\s*\d+\b|\bepisode\s*\d+\b|season\s*\d+/i.test(name);
+}
+
+/**
+ * Pick the best matching game from SGDB search results.
+ * Scoring: exact match > starts with > contains > partial
+ * Penalizes large length differences.
+ */
+function pickBestSgdbCandidate(results = [], requestedName = '') {
+    const target = normalizeTitle(requestedName);
+    if (!target || !results.length) return results[0] ?? null;
+
+    let best      = null;
+    let bestScore = -Infinity;
+
+    for (const item of results) {
+        const title = normalizeTitle(item?.name || item?.types?.[0] || '');
+        if (!title) continue;
+
+        let score = 0;
+        if (title === target)              score += 100;
+        else if (title.startsWith(target)) score += 60;
+        else if (target.startsWith(title)) score += 25;
+        else if (title.includes(target))   score += 40;
+        else if (target.includes(title))   score += 15;
+
+        // Penalize length difference
+        score -= Math.min(30, Math.abs(title.length - target.length));
+
+        if (score > bestScore) {
+            bestScore = score;
+            best      = item;
+        }
+    }
+
+    return best ?? results[0] ?? null;
+}
+
 // ─── 1. Resolve SteamGridDB game ID ──────────────────────────────────────────
 
 /**
- * Resolve the SteamGridDB internal game ID.
- * Tries Steam appId first; falls back to IGDB ID.
+ * Try all available lookup strategies and return SGDB game ID.
  *
- * @param {{ steamAppId?: string, igdbId?: number }} ids
+ * @param {{ steamAppId?: string, epicNamespace?: string, igdbId?: number, title?: string }} ids
  * @returns {Promise<number|null>}
  */
-async function resolveSgdbGameId({ steamAppId, igdbId }) {
+async function resolveSgdbGameId({ steamAppId, epicNamespace, igdbId, title }) {
+
+    // ── Strategy 1: Steam appId ──
     if (steamAppId) {
-        const data = await sgdbFetch(`/games/steam/${steamAppId}`);
-        if (data?.data?.id) return data.data.id;
+        const data = await sgdbFetch(`/games/steam/${steamAppId}`).catch(() => null);
+        if (data?.data?.id) {
+            console.log(`[SGDB] matched by Steam ID: ${data.data.id}`);
+            return data.data.id;
+        }
     }
 
+    // ── Strategy 2: Epic namespace ──
+    if (epicNamespace) {
+        const data = await sgdbFetch(`/games/egs/${epicNamespace}`).catch(() => null);
+        if (data?.data?.id) {
+            console.log(`[SGDB] matched by Epic namespace: ${data.data.id}`);
+            return data.data.id;
+        }
+    }
+
+    // ── Strategy 3: IGDB ID ──
     if (igdbId) {
-        const data = await sgdbFetch(`/games/igdb/${igdbId}`);
-        if (data?.data?.id) return data.data.id;
+        const data = await sgdbFetch(`/games/igdb/${igdbId}`).catch(() => null);
+        if (data?.data?.id) {
+            console.log(`[SGDB] matched by IGDB ID: ${data.data.id}`);
+            return data.data.id;
+        }
+    }
+
+    // ── Strategy 4: Name search ──
+    if (title) {
+        const sgdbId = await searchByName(title);
+        if (sgdbId) return sgdbId;
     }
 
     return null;
 }
 
+/**
+ * Search SGDB by name with colon-suffix retry for non-episodic titles.
+ */
+async function searchByName(title) {
+    const cleanTitle = title.replace(/['"®™©]/g, '').trim();
+
+    const trySearch = async (name) => {
+        const encoded = encodeURIComponent(name.replace(/[^a-zA-Z0-9\s]/g, '').trim());
+        const data    = await sgdbFetch(`/search/autocomplete/${encoded}`).catch(() => null);
+        if (!data?.data?.length) return null;
+
+        const best = pickBestSgdbCandidate(data.data, name);
+        return best?.id ?? null;
+    };
+
+    // First attempt with full name
+    let sgdbId = await trySearch(cleanTitle);
+    if (sgdbId) {
+        console.log(`[SGDB] matched by name search "${cleanTitle}": ${sgdbId}`);
+        return sgdbId;
+    }
+
+    // Retry with short name before colon (skip for episodic titles)
+    if (cleanTitle.includes(':') && !isEpisodicTitle(cleanTitle)) {
+        const short = cleanTitle.split(':')[0].trim();
+        if (short.length >= 4) {
+            sgdbId = await trySearch(short);
+            if (sgdbId) {
+                console.log(`[SGDB] matched by short name "${short}": ${sgdbId}`);
+                return sgdbId;
+            }
+        }
+    }
+
+    console.warn(`[SGDB] no match found for "${cleanTitle}"`);
+    return null;
+}
+
 // ─── 2. Image fetchers ────────────────────────────────────────────────────────
 
-/**
- * Pick the best image from a SteamGridDB image list.
- * Prefers: highest score → nsfw=false → animated=false
- *
- * @param {object[]} items  - raw SteamGridDB image objects
- * @returns {object|null}
- */
-function pickBest(items) {
+function pickBestImage(items) {
     if (!items?.length) return null;
 
-    // Filter SFW & static first; if nothing left fall back to all items
     const sfw    = items.filter(i => !i.nsfw && !i.epilepsy);
-    const static_ = sfw.filter(i => !i.url.endsWith('.webm'));
+    const static_ = sfw.filter(i => !i.url?.endsWith('.webm'));
     const pool    = static_.length ? static_ : sfw.length ? sfw : items;
 
-    // Sort by score desc (null scores treated as 0)
     pool.sort((a, b) => (b.score || 0) - (a.score || 0));
     return pool[0] ?? null;
 }
 
-/**
- * Fetch covers (portrait 600×900) from SteamGridDB for a given sgdbId.
- * Requests "tall" style (portrait) images only.
- *
- * @param {number} sgdbId
- * @returns {Promise<{url:string, width:number|null, height:number|null}|null>}
- */
 async function fetchSgdbCover(sgdbId) {
-    // dimensions=600x900 → portrait style
-    const data = await sgdbFetch(
-        `/grids/game/${sgdbId}?dimensions=600x900,342x482&types=static&limit=20`
-    );
-    const best = pickBest(data?.data);
+    const data = await sgdbFetch(`/grids/game/${sgdbId}?dimensions=600x900,342x482&types=static&limit=20`).catch(() => null);
+    const best = pickBestImage(data?.data);
     if (!best) return null;
     return { url: best.url, width: best.width || null, height: best.height || null };
 }
 
-/**
- * Fetch hero (wide banner) from SteamGridDB.
- *
- * @param {number} sgdbId
- * @returns {Promise<{url:string, width:number|null, height:number|null}|null>}
- */
 async function fetchSgdbHero(sgdbId) {
-    const data = await sgdbFetch(`/heroes/game/${sgdbId}?types=static&limit=20`);
-    const best = pickBest(data?.data);
+    const data = await sgdbFetch(`/heroes/game/${sgdbId}?types=static&limit=20`).catch(() => null);
+    const best = pickBestImage(data?.data);
     if (!best) return null;
     return { url: best.url, width: best.width || null, height: best.height || null };
 }
 
-/**
- * Fetch logo from SteamGridDB.
- *
- * @param {number} sgdbId
- * @returns {Promise<{url:string, width:number|null, height:number|null}|null>}
- */
 async function fetchSgdbLogo(sgdbId) {
-    const data = await sgdbFetch(`/logos/game/${sgdbId}?types=static&limit=20`);
-    const best = pickBest(data?.data);
+    const data = await sgdbFetch(`/logos/game/${sgdbId}?types=static&limit=20`).catch(() => null);
+    const best = pickBestImage(data?.data);
     if (!best) return null;
     return { url: best.url, width: best.width || null, height: best.height || null };
 }
@@ -128,24 +202,19 @@ async function fetchSgdbLogo(sgdbId) {
 // ─── 3. Main resolver ─────────────────────────────────────────────────────────
 
 /**
- * Resolve all three image types (cover, hero, logo) from SteamGridDB.
- * Returns only the images it found; caller handles IGDB fallback.
+ * Resolve cover, hero, logo from SteamGridDB.
  *
- * @param {{ steamAppId?: string, igdbId?: number }} ids
- * @returns {Promise<SgdbImages>}
- *
- * @typedef {{ cover: ImageInfo|null, hero: ImageInfo|null, logo: ImageInfo|null }} SgdbImages
- * @typedef {{ url: string, width: number|null, height: number|null }}              ImageInfo
+ * @param {{ steamAppId?: string, epicNamespace?: string, igdbId?: number, title?: string }} ids
+ * @returns {Promise<{ cover, hero, logo }>}
  */
-async function resolveSgdbImages({ steamAppId, igdbId }) {
-    const sgdbId = await resolveSgdbGameId({ steamAppId, igdbId });
+async function resolveSgdbImages({ steamAppId, epicNamespace, igdbId, title }) {
+    const sgdbId = await resolveSgdbGameId({ steamAppId, epicNamespace, igdbId, title });
 
     if (!sgdbId) {
-        console.warn(`[SGDB] No SGDB game found for steam:${steamAppId} igdb:${igdbId}`);
+        console.warn(`[SGDB] no game ID resolved`);
         return { cover: null, hero: null, logo: null };
     }
 
-    // Fetch all three in parallel
     const [cover, hero, logo] = await Promise.all([
         fetchSgdbCover(sgdbId).catch(() => null),
         fetchSgdbHero(sgdbId).catch(() => null),
