@@ -8,6 +8,7 @@
  *   2. By Epic namespace     → /games/egs/:namespace
  *   3. By IGDB ID            → /games/igdb/:igdbId
  *   4. Fallback: name search → /search/autocomplete/:name
+ *      - strips Demo / Chapter suffixes before searching
  *      - strips colon suffix for episodic-safe retry
  *      - uses scored candidate picking (exact > prefix > substring)
  */
@@ -44,6 +45,33 @@ function normalizeTitle(value) {
 
 function isEpisodicTitle(name) {
     return /\bep\s*\d+\b|\bepisode\s*\d+\b|season\s*\d+/i.test(name);
+}
+
+/**
+ * Build name candidates by stripping Demo and Chapter suffixes.
+ * Returns an array ordered from most-specific to least-specific.
+ */
+function buildNameCandidates(rawTitle) {
+    const candidates = [rawTitle];
+
+    // Strip "(Demo)", "- Demo", " Demo" from the end
+    const noDemo = rawTitle
+        .replace(/\s*[\(-]\s*demo\s*\)?$/i, '')
+        .replace(/\s+demo$/i, '')
+        .trim();
+
+    if (noDemo && noDemo !== rawTitle) candidates.push(noDemo);
+
+    // Strip "Chapter:N ..." or "Chapter N ..." and everything after
+    const noChapter = (noDemo || rawTitle)
+        .replace(/\s*[–-]?\s*chapter[:\s]\S.*$/i, '')
+        .trim();
+
+    if (noChapter && noChapter !== rawTitle && !candidates.includes(noChapter)) {
+        candidates.push(noChapter);
+    }
+
+    return [...new Set(candidates)];
 }
 
 /**
@@ -118,7 +146,7 @@ async function resolveSgdbGameId({ steamAppId, epicNamespace, igdbId, title }) {
         }
     }
 
-    // ── Strategy 4: Name search ──
+    // ── Strategy 4: Name search (with Demo/Chapter stripping) ──
     if (title) {
         const sgdbId = await searchByName(title);
         if (sgdbId) return sgdbId;
@@ -128,40 +156,45 @@ async function resolveSgdbGameId({ steamAppId, epicNamespace, igdbId, title }) {
 }
 
 /**
- * Search SGDB by name with colon-suffix retry for non-episodic titles.
+ * Search SGDB by name.
+ * Tries multiple name candidates (original → demo-stripped → chapter-stripped)
+ * and for each also retries with the pre-colon short name.
  */
 async function searchByName(title) {
-    const cleanTitle = title.replace(/['"®™©]/g, '').trim();
+    const raw = title.replace(/['"®™©]/g, '').trim();
+    const candidates = buildNameCandidates(raw);
 
     const trySearch = async (name) => {
         const encoded = encodeURIComponent(name.replace(/[^a-zA-Z0-9\s]/g, '').trim());
-        const data    = await sgdbFetch(`/search/autocomplete/${encoded}`).catch(() => null);
+        if (!encoded) return null;
+        const data = await sgdbFetch(`/search/autocomplete/${encoded}`).catch(() => null);
         if (!data?.data?.length) return null;
-
         const best = pickBestSgdbCandidate(data.data, name);
         return best?.id ?? null;
     };
 
-    // First attempt with full name
-    let sgdbId = await trySearch(cleanTitle);
-    if (sgdbId) {
-        console.log(`[SGDB] matched by name search "${cleanTitle}": ${sgdbId}`);
-        return sgdbId;
-    }
+    for (const candidate of candidates) {
+        // Try the candidate as-is
+        let sgdbId = await trySearch(candidate);
+        if (sgdbId) {
+            console.log(`[SGDB] matched by name search "${candidate}": ${sgdbId}`);
+            return sgdbId;
+        }
 
-    // Retry with short name before colon (skip for episodic titles)
-    if (cleanTitle.includes(':') && !isEpisodicTitle(cleanTitle)) {
-        const short = cleanTitle.split(':')[0].trim();
-        if (short.length >= 4) {
-            sgdbId = await trySearch(short);
-            if (sgdbId) {
-                console.log(`[SGDB] matched by short name "${short}": ${sgdbId}`);
-                return sgdbId;
+        // Retry with pre-colon short name (skip for episodic titles)
+        if (candidate.includes(':') && !isEpisodicTitle(candidate)) {
+            const short = candidate.split(':')[0].trim();
+            if (short.length >= 4) {
+                sgdbId = await trySearch(short);
+                if (sgdbId) {
+                    console.log(`[SGDB] matched by short name "${short}": ${sgdbId}`);
+                    return sgdbId;
+                }
             }
         }
     }
 
-    console.warn(`[SGDB] no match found for "${cleanTitle}"`);
+    console.warn(`[SGDB] no match found for "${raw}" (tried ${candidates.length} candidate(s))`);
     return null;
 }
 
@@ -170,7 +203,7 @@ async function searchByName(title) {
 function pickBestImage(items) {
     if (!items?.length) return null;
 
-    const sfw    = items.filter(i => !i.nsfw && !i.epilepsy);
+    const sfw     = items.filter(i => !i.nsfw && !i.epilepsy);
     const static_ = sfw.filter(i => !i.url?.endsWith('.webm'));
     const pool    = static_.length ? static_ : sfw.length ? sfw : items;
 

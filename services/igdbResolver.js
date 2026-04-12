@@ -4,10 +4,11 @@
  * services/igdbResolver.js
  *
  * Strategy:
- *   1. Lookup by external uid (Steam appId / Epic namespace) via external_games
+ *   1. Lookup by external uid — Steam only (Epic namespaces are not in IGDB external_games)
  *   2. Fallback: exact name search on /games (with PC platform preference)
- *   3. Fallback: fuzzy search sorted by popularity (total_rating_count)
+ *      - strips Demo / Chapter suffixes before searching
  *      - strips colon suffix for episodic-safe short-name retry
+ *   3. Fallback: fuzzy search sorted by popularity (total_rating_count)
  *      - rejects low-confidence matches (similarity < 0.55)
  */
 
@@ -121,10 +122,53 @@ function isEpisodicTitle(name) {
     return /\bep\s*\d+\b|\bepisode\s*\d+\b|season\s*\d+/i.test(name);
 }
 
+// ─── Title normalisation ──────────────────────────────────────────────────────
+
+/**
+ * Strip suffixes that prevent IGDB from matching the base game:
+ *   - Trailing "(Demo)", "- Demo", "Demo" (case-insensitive)
+ *   - Trailing "Chapter:N ...", "Chapter N ..." and everything after
+ *
+ * Returns an array of names to try, most-specific first.
+ * e.g. "Detroit Become Human (Demo)"  → ["Detroit Become Human (Demo)", "Detroit Become Human"]
+ *      "Deal With The Devil Chapter:2 From Tuonela to Hell Demo"
+ *                                      → [original, "Deal With The Devil", ...]
+ */
+function buildNameCandidates(rawTitle) {
+    const candidates = [rawTitle];
+
+    // Strip "(Demo)", "- Demo", " Demo" from the end
+    const noDemo = rawTitle
+        .replace(/\s*[\(-]\s*demo\s*\)?$/i, '')
+        .replace(/\s+demo$/i, '')
+        .trim();
+
+    if (noDemo && noDemo !== rawTitle) candidates.push(noDemo);
+
+    // Strip "Chapter:N ..." or "Chapter N ..." and everything after
+    const noChapter = (noDemo || rawTitle)
+        .replace(/\s*[–-]?\s*chapter[:\s]\S.*$/i, '')
+        .trim();
+
+    if (noChapter && noChapter !== rawTitle && !candidates.includes(noChapter)) {
+        candidates.push(noChapter);
+    }
+
+    return [...new Set(candidates)]; // deduplicate, preserve order
+}
+
 // ─── 1. Resolve IGDB game ID from external platform ID ───────────────────────
 
+/**
+ * Only attempt UID lookup for Steam — Epic namespaces are not indexed
+ * in IGDB's external_games table and always return [].
+ */
 async function resolveIgdbIdByUid(platform, externalId) {
-    // Filter by uid only — category field in WHERE clause causes 400
+    if (platform !== 'steam') {
+        console.log(`[IGDB] skipping UID lookup for platform="${platform}" (not indexed in IGDB)`);
+        return null;
+    }
+
     const query = `fields game,uid,name; where uid="${externalId}"; limit 5;`;
     console.log(`[IGDB] external_games uid lookup:`, query);
 
@@ -140,7 +184,6 @@ async function resolveIgdbIdByUid(platform, externalId) {
 
     if (!rows?.length) return null;
 
-    // If multiple results (same uid on different platforms), pick first with a game ref
     return rows.find(r => r.game)?.game ?? null;
 }
 
@@ -193,34 +236,41 @@ async function searchFuzzy(name) {
 async function resolveIgdbIdByName(title) {
     if (!title) return null;
 
-    const name = title.replace(/['"®™©]/g, '').trim();
-    console.log(`[IGDB] name search: "${name}"`);
+    const raw = title.replace(/['"®™©]/g, '').trim();
 
-    // Try exact first
-    let game = await searchExact(name);
+    // Build a list of name candidates (original → demo-stripped → chapter-stripped)
+    const candidates = buildNameCandidates(raw);
+    console.log(`[IGDB] name candidates:`, candidates);
 
-    // Retry without colon suffix (e.g. "Alien: Isolation" → "Alien")
-    if (!game && name.includes(':') && !isEpisodicTitle(name)) {
-        const short = name.split(':')[0].trim();
-        if (short.length >= 4) {
-            console.log(`[IGDB] retrying with short name: "${short}"`);
-            game = await searchExact(short);
+    for (const name of candidates) {
+        console.log(`[IGDB] name search: "${name}"`);
+
+        // Try exact first
+        let game = await searchExact(name);
+
+        // Retry without colon suffix (e.g. "Alien: Isolation" → "Alien")
+        if (!game && name.includes(':') && !isEpisodicTitle(name)) {
+            const short = name.split(':')[0].trim();
+            if (short.length >= 4) {
+                console.log(`[IGDB] retrying with short name: "${short}"`);
+                game = await searchExact(short);
+            }
+        }
+
+        // Fuzzy fallback
+        if (!game) {
+            console.log(`[IGDB] falling back to fuzzy search for "${name}"`);
+            game = await searchFuzzy(name);
+        }
+
+        if (game) {
+            console.log(`[IGDB] name search matched: ${game.name} (id=${game.id}) via candidate "${name}"`);
+            return game.id;
         }
     }
 
-    // Fuzzy fallback
-    if (!game) {
-        console.log(`[IGDB] falling back to fuzzy search`);
-        game = await searchFuzzy(name);
-    }
-
-    if (!game) {
-        console.log(`[IGDB] no match found for "${name}"`);
-        return null;
-    }
-
-    console.log(`[IGDB] name search matched: ${game.name} (id=${game.id})`);
-    return game.id;
+    console.log(`[IGDB] no match found for "${raw}" (tried ${candidates.length} candidate(s))`);
+    return null;
 }
 
 // ─── 3. Full game data ────────────────────────────────────────────────────────
@@ -256,11 +306,6 @@ async function fetchIgdbGameData(igdbId) {
         url: imgUrl(s.image_id, '1080p'), width: s.width || null, height: s.height || null,
     }));
 
-    // Prefer official trailer, fallback to first video
-    const trailerVideo = (g.videos || []).find(v =>
-        v.name?.toLowerCase().includes('trailer') || v.name?.toLowerCase().includes('official')
-    ) || g.videos?.[0];
-
     const videos = (g.videos || []).map(v => ({
         url:   `https://www.youtube-nocookie.com/embed/${v.video_id}?autoplay=0&rel=0`,
         thumb: `https://img.youtube.com/vi/${v.video_id}/mqdefault.jpg`,
@@ -292,16 +337,16 @@ async function fetchIgdbGameData(igdbId) {
 
 /**
  * Resolve IGDB game ID:
- *   1. By external uid (Steam appId / Epic namespace)
- *   2. Fallback: by title search
+ *   1. By external uid — Steam only
+ *   2. Fallback: by title search (with Demo/Chapter stripping)
  */
 async function resolveIgdbGameId(platform, externalId, title) {
-    // Try uid first
+    // UID lookup — Steam only
     let igdbId = await resolveIgdbIdByUid(platform, externalId);
 
     // Fallback to name search
     if (!igdbId && title) {
-        console.log(`[IGDB] uid lookup failed, trying name: "${title}"`);
+        console.log(`[IGDB] falling back to name search: "${title}"`);
         igdbId = await resolveIgdbIdByName(title);
     }
 
