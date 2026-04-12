@@ -126,33 +126,54 @@ function isEpisodicTitle(name) {
 
 /**
  * Strip suffixes that prevent IGDB from matching the base game:
- *   - Trailing "(Demo)", "- Demo", "Demo" (case-insensitive)
+ *   - Trailing "(Demo)", "- Demo", " Demo"
+ *   - Trailing "Prologue", "(Prologue)"
+ *   - Trailing "Free Trial", "- Trial", "(Trial)"
  *   - Trailing "Chapter:N ...", "Chapter N ..." and everything after
  *
  * Returns an array of names to try, most-specific first.
- * e.g. "Detroit Become Human (Demo)"  → ["Detroit Become Human (Demo)", "Detroit Become Human"]
- *      "Deal With The Devil Chapter:2 From Tuonela to Hell Demo"
- *                                      → [original, "Deal With The Devil", ...]
+ * e.g. "Detroit Become Human (Demo)"            → [original, "Detroit Become Human"]
+ *      "Far Cry 6 Free Trial"                   → [original, "Far Cry 6"]
+ *      "Barrett Foster Prologue"                → [original, "Barrett Foster"]
+ *      "Crime Boss: Rockay City - Trial"        → [original, "Crime Boss: Rockay City"]
+ *      "Deal With The Devil Chapter:2 From ..." → [original, stripped, "Deal With The Devil"]
  */
 function buildNameCandidates(rawTitle) {
+    const push = (arr, val) => {
+        const v = val?.trim();
+        if (v && !arr.includes(v)) arr.push(v);
+    };
+
     const candidates = [rawTitle];
 
-    // Strip "(Demo)", "- Demo", " Demo" from the end
+    // 1. Strip demo suffixes: "(Demo)", "- Demo", " Demo"
     const noDemo = rawTitle
         .replace(/\s*[\(-]\s*demo\s*\)?$/i, '')
         .replace(/\s+demo$/i, '')
         .trim();
+    push(candidates, noDemo);
 
-    if (noDemo && noDemo !== rawTitle) candidates.push(noDemo);
+    const base = noDemo || rawTitle;
 
-    // Strip "Chapter:N ..." or "Chapter N ..." and everything after
-    const noChapter = (noDemo || rawTitle)
+    // 2. Strip prologue suffixes: "Prologue", "(Prologue)", "- Prologue"
+    const noPrologue = base
+        .replace(/\s*[–\-]?\s*\(?\bprologue\b\)?$/i, '')
+        .trim();
+    push(candidates, noPrologue);
+
+    // 3. Strip trial suffixes: "Free Trial", "- Trial", "(Trial)"
+    const noTrial = base
+        .replace(/\s*[–\-]?\s*\(?\bfree\s+trial\b\)?$/i, '')
+        .replace(/\s*[–\-]\s*\(?\btrial\b\)?$/i, '')
+        .replace(/\s+\(trial\)$/i, '')
+        .trim();
+    push(candidates, noTrial);
+
+    // 4. Strip "Chapter:N ..." or "Chapter N ..." and everything after
+    const noChapter = base
         .replace(/\s*[–-]?\s*chapter[:\s]\S.*$/i, '')
         .trim();
-
-    if (noChapter && noChapter !== rawTitle && !candidates.includes(noChapter)) {
-        candidates.push(noChapter);
-    }
+    push(candidates, noChapter);
 
     return [...new Set(candidates)]; // deduplicate, preserve order
 }

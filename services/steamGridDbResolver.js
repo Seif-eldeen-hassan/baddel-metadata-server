@@ -48,28 +48,45 @@ function isEpisodicTitle(name) {
 }
 
 /**
- * Build name candidates by stripping Demo and Chapter suffixes.
+ * Build name candidates by stripping Demo, Prologue, Trial and Chapter suffixes.
  * Returns an array ordered from most-specific to least-specific.
  */
 function buildNameCandidates(rawTitle) {
+    const push = (arr, val) => {
+        const v = val?.trim();
+        if (v && !arr.includes(v)) arr.push(v);
+    };
+
     const candidates = [rawTitle];
 
-    // Strip "(Demo)", "- Demo", " Demo" from the end
+    // 1. Strip demo suffixes
     const noDemo = rawTitle
         .replace(/\s*[\(-]\s*demo\s*\)?$/i, '')
         .replace(/\s+demo$/i, '')
         .trim();
+    push(candidates, noDemo);
 
-    if (noDemo && noDemo !== rawTitle) candidates.push(noDemo);
+    const base = noDemo || rawTitle;
 
-    // Strip "Chapter:N ..." or "Chapter N ..." and everything after
-    const noChapter = (noDemo || rawTitle)
+    // 2. Strip prologue suffixes
+    const noPrologue = base
+        .replace(/\s*[–\-]?\s*\(?\bprologue\b\)?$/i, '')
+        .trim();
+    push(candidates, noPrologue);
+
+    // 3. Strip trial suffixes
+    const noTrial = base
+        .replace(/\s*[–\-]?\s*\(?\bfree\s+trial\b\)?$/i, '')
+        .replace(/\s*[–\-]\s*\(?\btrial\b\)?$/i, '')
+        .replace(/\s+\(trial\)$/i, '')
+        .trim();
+    push(candidates, noTrial);
+
+    // 4. Strip Chapter:N ... and everything after
+    const noChapter = base
         .replace(/\s*[–-]?\s*chapter[:\s]\S.*$/i, '')
         .trim();
-
-    if (noChapter && noChapter !== rawTitle && !candidates.includes(noChapter)) {
-        candidates.push(noChapter);
-    }
+    push(candidates, noChapter);
 
     return [...new Set(candidates)];
 }
