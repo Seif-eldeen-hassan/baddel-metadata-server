@@ -234,33 +234,23 @@ async function fetchAndSaveGames(pending) {
                 console.warn(`[Cover] ⚠️  No cover for ${platform}:${id}`);
             }
 
-            // ── 6. Save Epic hero (DieselGameBox) separately ──
-            // Stored as a standalone 'hero' entity with sort_order=0.
-            // If a better hero arrives later (e.g. from IGDB), it can be added
-            // with a higher sort_order and the client always picks sort_order ASC LIMIT 1.
-            if (platform === 'epic' && hero_url) {
-                try {
-                    const heroKey    = buildCoverKey('epic_hero', id, hero_url);
-                    const heroCdnUrl = await uploadImageToR2(hero_url, heroKey);
-                    if (heroCdnUrl) {
-                        await db.query(
-                            `INSERT INTO game_images (game_id, source, image_type, url, cdn_url, sort_order)
-                             VALUES ($1, 'epic', 'hero', $2, $3, 0)
-                             ON CONFLICT DO NOTHING`,
-                            [gameId, hero_url, heroCdnUrl]
-                        );
-                        console.log(`[Hero]  ✅ epic:${id} → ${heroCdnUrl}`);
-                    }
-                } catch (err) {
-                    console.warn(`[Hero]  ⚠️  epic:${id} —`, err.message);
-                }
-            }
+            // ── 6. Epic hero is intentionally NOT saved here ──────────────────
+            // Hero resolution order (handled by enrichGame.js):
+            //   1. SteamGridDB  2. IGDB artworks  3. Epic hero (last resort)
+            // Saving the Epic hero here would make enrichGame think it's already
+            // resolved and skip the SGDB/IGDB lookups entirely.
+            // The epic hero_url is stored in epic_metadata._heroUrl as a fallback hint.
 
             // ── 7. Store Epic metadata from Legendary disk cache ──────────────
             // Saved as source='epic' in game_metadata so enrich pipeline can use
             // developer, description, creationDate as fallbacks when IGDB fails.
             if (platform === 'epic' && epic_metadata) {
                 try {
+                    // Store hero_url as a fallback hint for enrichGame.js
+                    if (hero_url && !epic_metadata._heroUrl) {
+                        epic_metadata._heroUrl = hero_url;
+                    }
+
                     const epicDev  = epic_metadata.developer   || null;
                     const rawDesc  = epic_metadata.description || null;
                     // Skip description if it's just the game title repeated

@@ -267,21 +267,26 @@ async function enrichGame(gameId, platform, externalId, clientData = {}) {
         console.log(`[Enrich] cover already in DB — skipping (${existingCover.cdn_url || existingCover.url})`);
     }
 
-    // Hero — write SGDB/IGDB result; if nothing found, fall back to existing DB hero
+    // Hero — write SGDB/IGDB result; if nothing found, fall back to Epic hero as last resort
     if (heroR2.sourceUrl) {
         const heroSrc = sgdb.hero?.url ? 'steamgriddb' : 'igdb';
         await upsertImage(gameId, heroSrc, 'hero', heroR2.sourceUrl, heroR2.cdnUrl, heroMeta.width, heroMeta.height, 0);
     } else if (existingHero) {
         console.log(`[Enrich] hero: SGDB+IGDB both failed — keeping existing DB hero (${existingHero.cdn_url || existingHero.url})`);
-    } else if (epicMeta?.keyImages) {
-        // Last resort: Epic keyImages DieselGameBox as hero
-        const epicHeroUrl = _pickEpicImageType(epicMeta.keyImages, ['DieselGameBox', 'OfferImageWide']);
+    } else {
+        // Last resort: Epic hero — try _heroUrl first (direct URL stored at import),
+        // then fall back to picking from keyImages array.
+        const epicHeroUrl = epicMeta?._heroUrl
+            || _pickEpicImageType(epicMeta?.keyImages, ['DieselGameBox', 'OfferImageWide']);
+
         if (epicHeroUrl) {
             const epicHeroR2 = await uploadImage('epic', 'hero', externalId, epicHeroUrl);
             if (epicHeroR2.sourceUrl) {
                 await upsertImage(gameId, 'epic', 'hero', epicHeroR2.sourceUrl, epicHeroR2.cdnUrl, null, null, 0);
-                console.log(`[Enrich] hero: used Epic keyImages fallback`);
+                console.log(`[Enrich] hero: used Epic fallback (${epicMeta?._heroUrl ? '_heroUrl' : 'keyImages'}) → ${epicHeroR2.cdnUrl}`);
             }
+        } else {
+            console.log(`[Enrich] hero: no source found (SGDB, IGDB, Epic all failed)`);
         }
     }
 
