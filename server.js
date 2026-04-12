@@ -3,6 +3,7 @@ const express = require('express');
 const cors    = require('cors');
 const db      = require('./db');
 const { resolveSteamGame, resolveEpicGame } = require('./services/coverResolver');
+const { enrichGame, enrichGames }           = require('./services/enrichGame');
 
 const app = express();
 app.use(cors());
@@ -191,7 +192,11 @@ async function fetchAndSaveGames(pending) {
             }
 
             // ── 2. Build slug ─────────────────────────────────
-            const slug = payloadSlug || `${platform}-${id}`;
+            // ── 2. Build slug ─────────────────────────────────
+            const slugFromTitle = title
+                ? title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, '-')
+                : null;
+            const slug = payloadSlug || slugFromTitle || `${platform}-${id}`;
 
             // Fallback title if still null
             if (!title) title = slug;
@@ -256,6 +261,139 @@ async function fetchAndSaveGames(pending) {
         }
     }
 }
+
+// ─── Enrich Single Game ────────────────────────────────────────
+//
+// POST /games/enrich/:gameId
+// Enriches one game that already exists in the DB.
+// Looks up its platform_ids, then pulls IGDB + SteamGridDB data.
+//
+// Optional body: { "background": true }  → respond immediately, run in background
+//
+app.post('/games/enrich/:gameId', async (req, res) => {
+    const { gameId }    = req.params;
+    const background    = req.body?.background === true;
+
+    // Pull platform_ids for this game
+    let pidRows;
+    try {
+        const r = await db.query(
+            `SELECT platform, namespace, external_id FROM platform_ids WHERE game_id=$1`,
+            [gameId]
+        );
+        pidRows = r.rows;
+    } catch (err) {
+        return res.status(500).json({ status: 'error', message: err.message });
+    }
+
+    if (!pidRows.length) {
+        return res.status(404).json({
+            status: 'not_found',
+            message: 'Game not found or has no platform_ids',
+        });
+    }
+
+    // Prefer steam, then epic, then whatever exists
+    const pid =
+        pidRows.find(p => p.platform === 'steam') ||
+        pidRows.find(p => p.platform === 'epic')  ||
+        pidRows[0];
+
+    const { platform, external_id: externalId } = pid;
+
+    if (background) {
+        res.status(202).json({ status: 'accepted', message: 'Enrichment started in background', gameId });
+        enrichGame(gameId, platform, externalId).catch(err =>
+            console.error('[Enrich] Background error:', err.message)
+        );
+    } else {
+        try {
+            const result = await enrichGame(gameId, platform, externalId);
+            res.status(200).json({ status: 'success', data: result });
+        } catch (err) {
+            res.status(500).json({ status: 'error', message: err.message });
+        }
+    }
+});
+
+// ─── Enrich Batch ──────────────────────────────────────────────
+//
+// POST /games/enrich
+// Enrich multiple games at once (always runs in background).
+//
+// Body:
+// {
+//   "gameIds": ["uuid1", "uuid2", ...]          ← enrich specific games
+// }
+// OR:
+// {
+//   "enrichAll": true,                           ← enrich ALL games with no igdb metadata yet
+//   "limit": 50                                  ← optional cap (default 100)
+// }
+//
+app.post('/games/enrich', async (req, res) => {
+    const { gameIds, enrichAll, limit = 100 } = req.body || {};
+
+    let targets = [];
+
+    try {
+        if (enrichAll) {
+            // Find games that haven't been enriched from IGDB yet
+            const r = await db.query(
+                `SELECT g.id AS game_id, p.platform, p.external_id
+                 FROM games g
+                 JOIN platform_ids p ON p.game_id = g.id
+                 WHERE p.platform IN ('steam','epic')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM game_metadata m
+                       WHERE m.game_id = g.id AND m.source = 'igdb'
+                   )
+                 ORDER BY g.created_at DESC
+                 LIMIT $1`,
+                [limit]
+            );
+            targets = r.rows.map(row => ({
+                gameId:     row.game_id,
+                platform:   row.platform,
+                externalId: row.external_id,
+            }));
+        } else if (Array.isArray(gameIds) && gameIds.length) {
+            const r = await db.query(
+                `SELECT g.id AS game_id, p.platform, p.external_id
+                 FROM games g
+                 JOIN platform_ids p ON p.game_id = g.id
+                 WHERE g.id = ANY($1::uuid[])
+                   AND p.platform IN ('steam','epic')`,
+                [gameIds]
+            );
+            targets = r.rows.map(row => ({
+                gameId:     row.game_id,
+                platform:   row.platform,
+                externalId: row.external_id,
+            }));
+        } else {
+            return res.status(400).json({
+                status:  'error',
+                message: 'Provide gameIds array OR enrichAll:true',
+            });
+        }
+    } catch (err) {
+        return res.status(500).json({ status: 'error', message: err.message });
+    }
+
+    res.status(202).json({
+        status:  'accepted',
+        message: `Enriching ${targets.length} games in background`,
+        count:   targets.length,
+    });
+
+    if (targets.length > 0) {
+        console.log(`[Enrich] Batch: ${targets.length} games queued`);
+        enrichGames(targets).catch(err =>
+            console.error('[Enrich] Batch error:', err.message)
+        );
+    }
+});
 
 // ─── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
