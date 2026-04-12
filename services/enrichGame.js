@@ -163,14 +163,30 @@ async function updateGameMeta(gameId, igdbData) {
 async function enrichGame(gameId, platform, externalId, clientData = {}) {
     console.log(`[Enrich] ▶ gameId=${gameId} platform=${platform} id=${externalId}`);
 
-    // ── Step 1: Get game title from DB ────────────────────────────────────────
-    let gameTitle = null;
+    // ── Step 1: Get game title + existing images from DB ─────────────────────
+    let gameTitle    = null;
+    let existingCover = null;
+    let existingHero  = null;
     try {
-        const r = await db.query('SELECT title FROM games WHERE id=$1', [gameId]);
-        gameTitle = r.rows[0]?.title || null;
+        const [titleRes, imagesRes] = await Promise.all([
+            db.query('SELECT title FROM games WHERE id=$1', [gameId]),
+            db.query(
+                `SELECT image_type, url, cdn_url FROM game_images
+                 WHERE game_id=$1 AND image_type IN ('cover','hero')
+                 ORDER BY sort_order ASC`,
+                [gameId]
+            ),
+        ]);
+        gameTitle     = titleRes.rows[0]?.title || null;
+        existingCover = imagesRes.rows.find(r => r.image_type === 'cover') || null;
+        existingHero  = imagesRes.rows.find(r => r.image_type === 'hero')  || null;
     } catch (err) {
-        console.warn('[Enrich] Could not fetch game title:', err.message);
+        console.warn('[Enrich] Could not fetch game info from DB:', err.message);
     }
+
+    // Epic metadata sent from client (Legendary disk cache) — used as fallback
+    // for cover, hero, description, release_year, developer when IGDB/SGDB fail
+    const epicMeta = clientData.epic_metadata || null;
 
     // ── Step 2: Resolve IGDB data ─────────────────────────────────────────────
     let igdbResult = null;
@@ -200,30 +216,79 @@ async function enrichGame(gameId, platform, externalId, clientData = {}) {
         console.warn(`[Enrich] SGDB fetch failed —`, err.message);
     }
 
-    // ── Step 4: Decide final image sources (SGDB → IGDB fallback) ────────────
-    const coverSource = sgdb.cover?.url || igdbData?.images?.cover?.url        || null;
-    const heroSource  = sgdb.hero?.url  || igdbData?.images?.artworks?.[0]?.url || null;
-    const logoSource  = sgdb.logo?.url  || null;
+    // ── Step 4: Decide final image sources ────────────────────────────────────
+    //
+    // Cover priority:
+    //   existing DB cover (already uploaded during import) → SGDB → IGDB
+    //   rationale: Epic/Steam cover was already saved at import time — trust it,
+    //              don't waste R2 bandwidth re-uploading a worse image.
+    //
+    // Hero priority:
+    //   SGDB → IGDB artworks → existing DB hero (Epic DieselGameBox from import)
+    //
+    // Logo priority:
+    //   SGDB → IGDB
+    //
+    const coverSource = existingCover
+        ? null  // already in DB — skip upload, reuse below
+        : (sgdb.cover?.url || igdbData?.images?.cover?.url || null);
+
+    const heroSource = sgdb.hero?.url
+        || igdbData?.images?.artworks?.[0]?.url
+        || null;
+        // existing DB hero handled separately below if heroR2 fails
+
+    const logoSource = sgdb.logo?.url || igdbData?.images?.logo?.url || null;
 
     const coverMeta = sgdb.cover || igdbData?.images?.cover        || {};
     const heroMeta  = sgdb.hero  || igdbData?.images?.artworks?.[0] || {};
 
     // ── Step 5: Upload images to R2 ───────────────────────────────────────────
     const [coverR2, heroR2, logoR2] = await Promise.all([
-        uploadImage(platform, 'cover', externalId, coverSource),
-        uploadImage(platform, 'hero',  externalId, heroSource),
-        uploadImage(platform, 'logo',  externalId, logoSource),
+        coverSource
+            ? uploadImage(platform, 'cover', externalId, coverSource)
+            : Promise.resolve({ sourceUrl: null, cdnUrl: null }),
+        heroSource
+            ? uploadImage(platform, 'hero', externalId, heroSource)
+            : Promise.resolve({ sourceUrl: null, cdnUrl: null }),
+        logoSource
+            ? uploadImage(platform, 'logo', externalId, logoSource)
+            : Promise.resolve({ sourceUrl: null, cdnUrl: null }),
     ]);
 
     // ── Step 6: Persist images ────────────────────────────────────────────────
-    const coverSrc = sgdb.cover?.url ? 'steamgriddb' : 'igdb';
-    const heroSrc  = sgdb.hero?.url  ? 'steamgriddb' : 'igdb';
 
-    await Promise.all([
-        upsertImage(gameId, coverSrc,      'cover',      coverR2.sourceUrl, coverR2.cdnUrl, coverMeta.width, coverMeta.height, 0),
-        upsertImage(gameId, heroSrc,       'hero',       heroR2.sourceUrl,  heroR2.cdnUrl,  heroMeta.width,  heroMeta.height,  0),
-        upsertImage(gameId, 'steamgriddb', 'logo',       logoR2.sourceUrl,  logoR2.cdnUrl,  null, null, 0),
-    ]);
+    // Cover — only write if we actually fetched a new one (existing already in DB)
+    if (coverR2.sourceUrl) {
+        const coverSrc = sgdb.cover?.url ? 'steamgriddb' : 'igdb';
+        await upsertImage(gameId, coverSrc, 'cover', coverR2.sourceUrl, coverR2.cdnUrl, coverMeta.width, coverMeta.height, 0);
+    } else if (existingCover) {
+        console.log(`[Enrich] cover already in DB — skipping (${existingCover.cdn_url || existingCover.url})`);
+    }
+
+    // Hero — write SGDB/IGDB result; if nothing found, fall back to existing DB hero
+    if (heroR2.sourceUrl) {
+        const heroSrc = sgdb.hero?.url ? 'steamgriddb' : 'igdb';
+        await upsertImage(gameId, heroSrc, 'hero', heroR2.sourceUrl, heroR2.cdnUrl, heroMeta.width, heroMeta.height, 0);
+    } else if (existingHero) {
+        console.log(`[Enrich] hero: SGDB+IGDB both failed — keeping existing DB hero (${existingHero.cdn_url || existingHero.url})`);
+    } else if (epicMeta?.keyImages) {
+        // Last resort: Epic keyImages DieselGameBox as hero
+        const epicHeroUrl = _pickEpicImageType(epicMeta.keyImages, ['DieselGameBox', 'OfferImageWide']);
+        if (epicHeroUrl) {
+            const epicHeroR2 = await uploadImage('epic', 'hero', externalId, epicHeroUrl);
+            if (epicHeroR2.sourceUrl) {
+                await upsertImage(gameId, 'epic', 'hero', epicHeroR2.sourceUrl, epicHeroR2.cdnUrl, null, null, 0);
+                console.log(`[Enrich] hero: used Epic keyImages fallback`);
+            }
+        }
+    }
+
+    // Logo
+    if (logoR2.sourceUrl) {
+        const logoSrc = sgdb.logo?.url ? 'steamgriddb' : 'igdb';
+        await upsertImage(gameId, logoSrc, 'logo', logoR2.sourceUrl, logoR2.cdnUrl, null, null, 0);
+    }
 
     // ── Step 7: Persist screenshots from IGDB ────────────────────────────────
     if (igdbData?.images?.screenshots?.length) {
@@ -244,6 +309,9 @@ async function enrichGame(gameId, platform, externalId, clientData = {}) {
         ]);
     }
 
+    // ── Step 8b: Epic/Steam fallbacks for fields IGDB couldn't fill ──────────
+    await _applyClientFallbacks(gameId, platform, igdbData, epicMeta, clientData);
+
     // ── Step 9: Persist client-provided Steam rating ──────────────────────────
     if (clientData.steamRating) {
         await upsertSteamRating(gameId, clientData.steamRating);
@@ -254,10 +322,13 @@ async function enrichGame(gameId, platform, externalId, clientData = {}) {
         await upsertSysreq(gameId, clientData.sysreq, 'steam');
     }
 
+    const finalCover = coverR2.cdnUrl || existingCover?.cdn_url || null;
+    const finalHero  = heroR2.cdnUrl  || existingHero?.cdn_url  || null;
+
     console.log(
         `[Enrich] ✅ gameId=${gameId}` +
-        ` cover=${coverR2.cdnUrl ? '✅' : '❌'}` +
-        ` hero=${heroR2.cdnUrl   ? '✅' : '❌'}` +
+        ` cover=${finalCover ? '✅' : '❌'}` +
+        ` hero=${finalHero   ? '✅' : '❌'}` +
         ` logo=${logoR2.cdnUrl   ? '✅' : '❌'}` +
         ` igdb=${igdbData        ? '✅' : '❌'}`
     );
@@ -265,11 +336,81 @@ async function enrichGame(gameId, platform, externalId, clientData = {}) {
     return {
         gameId,
         igdbId,
-        cover:       coverR2.cdnUrl,
-        hero:        heroR2.cdnUrl,
+        cover:       finalCover,
+        hero:        finalHero,
         logo:        logoR2.cdnUrl,
         hasMetadata: !!igdbData,
     };
+}
+
+// ─── Epic keyImage picker helper ──────────────────────────────────────────────
+
+function _pickEpicImageType(keyImages, types) {
+    if (!Array.isArray(keyImages)) return null;
+    for (const type of types) {
+        const img = keyImages.find(k => k.type === type);
+        if (img?.url) return img.url;
+    }
+    return null;
+}
+
+// ─── Client fallbacks for fields IGDB couldn't fill ──────────────────────────
+//
+// release_year: IGDB → Epic creationDate year (Epic) / already in DB (Steam)
+// developer:    IGDB → Epic metadata.developer
+// description:  IGDB → Epic metadata.description (only if it differs from the title)
+//
+async function _applyClientFallbacks(gameId, platform, igdbData, epicMeta, clientData) {
+    try {
+        const current = await db.query(
+            `SELECT title, release_year FROM games WHERE id=$1`,
+            [gameId]
+        );
+        const row = current.rows[0];
+        if (!row) return;
+
+        // release_year fallback
+        if (!igdbData?.releaseYear && !row.release_year) {
+            let fallbackYear = null;
+
+            if (platform === 'epic' && epicMeta?.creationDate) {
+                fallbackYear = new Date(epicMeta.creationDate).getFullYear() || null;
+            }
+
+            if (fallbackYear) {
+                await db.query(
+                    `UPDATE games SET release_year=COALESCE(release_year,$2), updated_at=now() WHERE id=$1`,
+                    [gameId, fallbackYear]
+                );
+                console.log(`[Enrich] release_year fallback → ${fallbackYear} (from Epic creationDate)`);
+            }
+        }
+
+        // developer + description fallback — only when IGDB returned nothing
+        if (!igdbData && platform === 'epic' && epicMeta) {
+            const epicDeveloper   = epicMeta.developer   || null;
+            // Epic description is often just the title — skip it if so
+            const rawDesc         = epicMeta.description || null;
+            const epicDescription = rawDesc && rawDesc.toLowerCase() !== (row.title || '').toLowerCase()
+                ? rawDesc
+                : null;
+
+            if (epicDeveloper || epicDescription) {
+                await db.query(
+                    `INSERT INTO game_metadata (game_id, source, description, genres, tags, developer, publisher)
+                     VALUES ($1, 'epic', $2, '{}', '{}', $3, NULL)
+                     ON CONFLICT (game_id, source) DO UPDATE SET
+                         description = COALESCE(EXCLUDED.description, game_metadata.description),
+                         developer   = COALESCE(EXCLUDED.developer,   game_metadata.developer),
+                         fetched_at  = now()`,
+                    [gameId, epicDescription, epicDeveloper]
+                );
+                console.log(`[Enrich] Epic metadata fallback — developer="${epicDeveloper}" description=${!!epicDescription}`);
+            }
+        }
+    } catch (err) {
+        console.warn('[Enrich] _applyClientFallbacks error:', err.message);
+    }
 }
 
 /**

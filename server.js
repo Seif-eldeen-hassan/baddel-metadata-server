@@ -168,7 +168,7 @@ app.post('/games/import', async (req, res) => {
 async function fetchAndSaveGames(pending) {
     for (const item of pending) {
         try {
-            const { platform, id, title: payloadTitle, slug: payloadSlug, cover_url, hero_url, entry_type: payloadType } = item;
+            const { platform, id, title: payloadTitle, slug: payloadSlug, cover_url, hero_url, entry_type: payloadType, epic_metadata } = item;
             const ns = platform === 'steam' ? 'app_id' : 'catalog_namespace';
 
             // ── 1. Resolve cover + metadata ──────────────────
@@ -253,6 +253,47 @@ async function fetchAndSaveGames(pending) {
                     }
                 } catch (err) {
                     console.warn(`[Hero]  ⚠️  epic:${id} —`, err.message);
+                }
+            }
+
+            // ── 7. Store Epic metadata from Legendary disk cache ──────────────
+            // Saved as source='epic' in game_metadata so enrich pipeline can use
+            // developer, description, creationDate as fallbacks when IGDB fails.
+            if (platform === 'epic' && epic_metadata) {
+                try {
+                    const epicDev  = epic_metadata.developer   || null;
+                    const rawDesc  = epic_metadata.description || null;
+                    // Skip description if it's just the game title repeated
+                    const epicDesc = rawDesc && rawDesc.toLowerCase() !== (title || '').toLowerCase()
+                        ? rawDesc
+                        : null;
+                    const epicYear = epic_metadata.creationDate
+                        ? new Date(epic_metadata.creationDate).getFullYear() || null
+                        : null;
+
+                    if (epicDev || epicDesc) {
+                        await db.query(
+                            `INSERT INTO game_metadata (game_id, source, description, genres, tags, developer, publisher)
+                             VALUES ($1, 'epic', $2, '{}', '{}', $3, NULL)
+                             ON CONFLICT (game_id, source) DO UPDATE SET
+                                 description = COALESCE(EXCLUDED.description, game_metadata.description),
+                                 developer   = COALESCE(EXCLUDED.developer,   game_metadata.developer),
+                                 fetched_at  = now()`,
+                            [gameId, epicDesc, epicDev]
+                        );
+                    }
+
+                    // Store creationDate year as release_year fallback
+                    if (epicYear) {
+                        await db.query(
+                            `UPDATE games SET release_year=COALESCE(release_year,$2), updated_at=now() WHERE id=$1`,
+                            [gameId, epicYear]
+                        );
+                    }
+
+                    console.log(`[Meta]  ✅ epic:${id} — developer="${epicDev}" year=${epicYear}`);
+                } catch (err) {
+                    console.warn(`[Meta]  ⚠️  epic_metadata save failed for ${id}:`, err.message);
                 }
             }
 

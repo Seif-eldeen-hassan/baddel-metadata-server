@@ -296,9 +296,25 @@ async function resolveIgdbIdByName(title) {
 
 // ─── 3. Full game data ────────────────────────────────────────────────────────
 
+async function _fetchIgdbLogo(igdbId) {
+    try {
+        const rows = await igdbFetch('game_logos', `fields image_id, width, height; where game=${igdbId}; limit 1;`);
+        const l = rows?.[0];
+        if (!l?.image_id) return null;
+        return {
+            url:    `https://images.igdb.com/igdb/image/upload/t_logo_med/${l.image_id}.png`,
+            width:  l.width  || null,
+            height: l.height || null,
+        };
+    } catch { return null; }
+}
+
 async function fetchIgdbGameData(igdbId) {
-    const rows = await igdbFetch('games', `fields ${GAME_FIELDS}; where id=${igdbId}; limit 1;`);
-    const g    = rows?.[0];
+    const [rows, logo] = await Promise.all([
+        igdbFetch('games', `fields ${GAME_FIELDS}; where id=${igdbId}; limit 1;`),
+        _fetchIgdbLogo(igdbId),
+    ]);
+    const g = rows?.[0];
     if (!g) return null;
 
     const developers = (g.involved_companies || []).filter(ic => ic.developer).map(ic => ic.company?.name).filter(Boolean);
@@ -318,6 +334,8 @@ async function fetchIgdbGameData(igdbId) {
     const cover = g.cover?.image_id
         ? { url: imgUrl(g.cover.image_id, '720p'), width: g.cover.width || null, height: g.cover.height || null }
         : null;
+
+    // logo fetched separately via _fetchIgdbLogo() — see parallel call below
 
     const artworks = (g.artworks || []).map(a => ({
         url: imgUrl(a.image_id, '1080p'), width: a.width || null, height: a.height || null,
@@ -349,7 +367,7 @@ async function fetchIgdbGameData(igdbId) {
             : g.rating
             ? { score: g.rating,            count: g.rating_count,            source: 'igdb_users' }
             : null,
-        images: { cover, artworks, screenshots },
+        images: { cover, logo, artworks, screenshots },
         videos,
     };
 }
