@@ -9,6 +9,7 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const app = express();
 app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 app.use(express.json());
 
 // ─── Health Check ─────────────────────────────────────────────
