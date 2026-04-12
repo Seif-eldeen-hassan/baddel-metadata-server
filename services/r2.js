@@ -47,9 +47,11 @@ async function uploadImageToR2(imageUrl, key) {
 
         if (!res.ok) throw new Error(`HTTP ${res.status} fetching image`);
 
-        const originalBuffer = Buffer.from(await res.arrayBuffer());
-        const webpBuffer = await sharp(originalBuffer)
-            .webp({ quality: 80 }) 
+        // استخدمنا let بدل const عشان نقدر نفضيها
+        let originalBuffer = Buffer.from(await res.arrayBuffer());
+        
+        let webpBuffer = await sharp(originalBuffer)
+            .webp({ quality: 80 })
             .toBuffer();
 
         await r2.send(new PutObjectCommand({
@@ -58,6 +60,9 @@ async function uploadImageToR2(imageUrl, key) {
             Body:        webpBuffer,
             ContentType: 'image/webp',
         }));
+
+        originalBuffer = null;
+        webpBuffer = null;
 
         return `${PUBLIC_BASE}/${key}`;
     } catch (err) {

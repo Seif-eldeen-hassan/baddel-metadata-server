@@ -14,6 +14,7 @@ const db                    = require('../db');
 const { resolveAndFetch }   = require('./igdbResolver');
 const { resolveSgdbImages } = require('./steamGridDbResolver');
 const { uploadImageToR2, buildCoverKey } = require('./r2');
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ─── Image upload helper ──────────────────────────────────────────────────────
 
@@ -423,6 +424,7 @@ async function enrichGames(items) {
         } catch (err) {
             console.error(`[Enrich] ❌ gameId=${item.gameId} —`, err.message);
         }
+        await delay(500);
     }
 }
 

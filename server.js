@@ -4,6 +4,7 @@ const cors    = require('cors');
 const db      = require('./db');
 const { resolveSteamGame, resolveEpicGame } = require('./services/coverResolver');
 const { enrichGame, enrichGames }           = require('./services/enrichGame');
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const app = express();
 app.use(cors());
@@ -300,6 +301,7 @@ async function fetchAndSaveGames(pending) {
         } catch (err) {
             console.error(`[Cover] ❌ ${item.platform}:${item.id} —`, err.message);
         }
+        await delay(500);
     }
 }
 
