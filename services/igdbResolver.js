@@ -50,23 +50,23 @@ async function igdbFetch(endpoint, body) {
 // ─── 1. Resolve IGDB game ID ──────────────────────────────────────────────────
 
 async function resolveIgdbIdForSteam(steamAppId) {
-    // Filter /games directly by nested external_games fields
-    const query = `fields id,name,slug; where external_games.uid="${steamAppId}" & external_games.category=1; limit 1;`;
-    console.log(`[IGDB] games query (steam):`, query);
+    // Filter by uid only — category field breaks the query
+    const query = `fields game,uid,name; where uid="${steamAppId}"; limit 1;`;
+    console.log(`[IGDB] external_games query (steam):`, query);
 
     let rows;
     try {
-        rows = await igdbFetch('games', query);
+        rows = await igdbFetch('external_games', query);
     } catch (err) {
-        console.error('[IGDB] games fetch error (steam):', err.message);
+        console.error('[IGDB] external_games fetch error (steam):', err.message);
         return null;
     }
-    console.log(`[IGDB] games response (steam):`, JSON.stringify(rows));
-    return rows?.[0]?.id ?? null;
+    console.log(`[IGDB] external_games response (steam):`, JSON.stringify(rows));
+    return rows?.[0]?.game ?? null;
 }
 
 async function resolveIgdbIdForEpic(namespace) {
-    const query = `fields game,uid,name; where category=26 & uid="${namespace}"; limit 1;`;
+    const query = `fields game,uid,name; where uid="${namespace}"; limit 1;`;
     console.log(`[IGDB] external_games query (epic):`, query);
 
     let rows;
