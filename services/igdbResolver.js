@@ -75,7 +75,8 @@ async function resolveIgdbGameId(platform, externalId) {
     if (!category) return null;
 
     // uid is stored as a string in IGDB (e.g. "292030")
-    const query = `fields game,uid,name; where category=${category} & uid="${externalId}"; limit 1;`;
+    // IGDB stores Steam UIDs as integers, try both quoted and unquoted
+    const query = `fields game,uid,name; where category=${category} & uid=${externalId}; limit 1;`;
     console.log(`[IGDB] external_games query:`, query);
 
     let rows;
