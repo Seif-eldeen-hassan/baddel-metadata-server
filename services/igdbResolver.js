@@ -10,6 +10,11 @@
  *      - strips colon suffix for episodic-safe short-name retry
  *   3. Fallback: fuzzy search sorted by popularity (total_rating_count)
  *      - rejects low-confidence matches (similarity < 0.55)
+ *
+ * Rate limiting:
+ *   IGDB (Twitch) free tier = 4 requests/second burst, ~200 req/min sustained.
+ *   We throttle to MAX_RPS requests/second using a token-bucket queue so we
+ *   never hit 429 regardless of how many games are enriched concurrently.
  */
 
 // ─── Token Cache ──────────────────────────────────────────────────────────────
@@ -36,7 +41,49 @@ async function getAccessToken() {
     return _token;
 }
 
+// ─── Rate-limit throttler ─────────────────────────────────────────────────────
+//
+// IGDB free tier: 4 req/s burst.
+// We allow MAX_RPS=3 to stay safely under the limit even with clock jitter.
+// All igdbFetch() calls go through this queue — one slot released per interval.
+//
+const MAX_RPS          = 3;                        // requests per second
+const SLOT_INTERVAL_MS = Math.ceil(1000 / MAX_RPS); // ~334ms per slot
+
+let _queue        = [];
+let _tickRunning  = false;
+
+function _scheduleTick() {
+    if (_tickRunning) return;
+    _tickRunning = true;
+
+    const tick = () => {
+        if (_queue.length === 0) {
+            _tickRunning = false;
+            return;
+        }
+        const resolve = _queue.shift();
+        resolve();
+        setTimeout(tick, SLOT_INTERVAL_MS);
+    };
+
+    setTimeout(tick, 0);
+}
+
+/**
+ * Acquire a rate-limit slot before making an IGDB request.
+ * Returns a promise that resolves when it's safe to proceed.
+ */
+function _acquireSlot() {
+    return new Promise((resolve) => {
+        _queue.push(resolve);
+        _scheduleTick();
+    });
+}
+
 async function igdbFetch(endpoint, body) {
+    await _acquireSlot(); // wait for rate-limit slot
+
     const token = await getAccessToken();
 
     const res = await fetch(`https://api.igdb.com/v4/${endpoint}`, {
@@ -89,10 +136,8 @@ function nameSimilarity(a, b) {
 
     const lengthRatio = Math.min(ca.length, cb.length) / Math.max(ca.length, cb.length);
 
-    // Substring match — only high similarity when lengths are close
     if (lengthRatio > 0.7 && (ca.includes(cb) || cb.includes(ca))) return 0.85;
 
-    // Jaccard on words
     const setA = new Set(ca.split(/\s+/));
     const setB = new Set(cb.split(/\s+/));
     const intersection = [...setA].filter(w => setB.has(w)).length;
@@ -100,7 +145,6 @@ function nameSimilarity(a, b) {
     const jaccard      = union === 0 ? 0 : intersection / union;
     if (jaccard >= 0.55) return jaccard;
 
-    // Bigram similarity — handles typos and small differences
     if (lengthRatio > 0.5) {
         const bigrams = s => {
             const set = new Set();
@@ -124,20 +168,6 @@ function isEpisodicTitle(name) {
 
 // ─── Title normalisation ──────────────────────────────────────────────────────
 
-/**
- * Strip suffixes that prevent IGDB from matching the base game:
- *   - Trailing "(Demo)", "- Demo", " Demo"
- *   - Trailing "Prologue", "(Prologue)"
- *   - Trailing "Free Trial", "- Trial", "(Trial)"
- *   - Trailing "Chapter:N ...", "Chapter N ..." and everything after
- *
- * Returns an array of names to try, most-specific first.
- * e.g. "Detroit Become Human (Demo)"            → [original, "Detroit Become Human"]
- *      "Far Cry 6 Free Trial"                   → [original, "Far Cry 6"]
- *      "Barrett Foster Prologue"                → [original, "Barrett Foster"]
- *      "Crime Boss: Rockay City - Trial"        → [original, "Crime Boss: Rockay City"]
- *      "Deal With The Devil Chapter:2 From ..." → [original, stripped, "Deal With The Devil"]
- */
 function buildNameCandidates(rawTitle) {
     const push = (arr, val) => {
         const v = val?.trim();
@@ -146,7 +176,6 @@ function buildNameCandidates(rawTitle) {
 
     const candidates = [rawTitle];
 
-    // 1. Strip demo suffixes: "(Demo)", "- Demo", " Demo"
     const noDemo = rawTitle
         .replace(/\s*[\(-]\s*demo\s*\)?$/i, '')
         .replace(/\s+demo$/i, '')
@@ -155,13 +184,11 @@ function buildNameCandidates(rawTitle) {
 
     const base = noDemo || rawTitle;
 
-    // 2. Strip prologue suffixes: "Prologue", "(Prologue)", "- Prologue"
     const noPrologue = base
         .replace(/\s*[–\-]?\s*\(?\bprologue\b\)?$/i, '')
         .trim();
     push(candidates, noPrologue);
 
-    // 3. Strip trial suffixes: "Free Trial", "- Trial", "(Trial)"
     const noTrial = base
         .replace(/\s*[–\-]?\s*\(?\bfree\s+trial\b\)?$/i, '')
         .replace(/\s*[–\-]\s*\(?\btrial\b\)?$/i, '')
@@ -169,21 +196,16 @@ function buildNameCandidates(rawTitle) {
         .trim();
     push(candidates, noTrial);
 
-    // 4. Strip "Chapter:N ..." or "Chapter N ..." and everything after
     const noChapter = base
         .replace(/\s*[–-]?\s*chapter[:\s]\S.*$/i, '')
         .trim();
     push(candidates, noChapter);
 
-    return [...new Set(candidates)]; // deduplicate, preserve order
+    return [...new Set(candidates)];
 }
 
 // ─── 1. Resolve IGDB game ID from external platform ID ───────────────────────
 
-/**
- * Only attempt UID lookup for Steam — Epic namespaces are not indexed
- * in IGDB's external_games table and always return [].
- */
 async function resolveIgdbIdByUid(platform, externalId) {
     if (platform !== 'steam') {
         console.log(`[IGDB] skipping UID lookup for platform="${platform}" (not indexed in IGDB)`);
@@ -215,14 +237,12 @@ async function searchExact(name) {
     const results = await igdbFetch('games', body);
     if (!results?.length) return null;
 
-    // Exact match on PC first
     const exactPC = results.find(g =>
         g.name?.toLowerCase() === name.toLowerCase() &&
         g.platforms?.some(p => PC_PLATFORM_IDS.includes(p.id))
     );
     if (exactPC) return exactPC;
 
-    // Exact match any platform
     return results.find(g => g.name?.toLowerCase() === name.toLowerCase()) ?? null;
 }
 
@@ -234,19 +254,16 @@ async function searchFuzzy(name) {
     const valid = results.filter(g => g.name);
     if (!valid.length) return null;
 
-    // Sort by popularity unless episodic (where name similarity should win)
     if (!isEpisodicTitle(name)) {
         valid.sort((a, b) => (b.total_rating_count || 0) - (a.total_rating_count || 0));
     }
 
-    // PC match with good similarity
     const pcMatch = valid.find(g =>
         g.platforms?.some(p => PC_PLATFORM_IDS.includes(p.id)) &&
         nameSimilarity(g.name, name) > 0.82
     );
     if (pcMatch) return pcMatch;
 
-    // Best similarity overall
     const best = valid.reduce((prev, curr) =>
         nameSimilarity(curr.name, name) > nameSimilarity(prev.name, name) ? curr : prev
     , valid[0]);
@@ -258,18 +275,14 @@ async function resolveIgdbIdByName(title) {
     if (!title) return null;
 
     const raw = title.replace(/['"®™©]/g, '').trim();
-
-    // Build a list of name candidates (original → demo-stripped → chapter-stripped)
     const candidates = buildNameCandidates(raw);
     console.log(`[IGDB] name candidates:`, candidates);
 
     for (const name of candidates) {
         console.log(`[IGDB] name search: "${name}"`);
 
-        // Try exact first
         let game = await searchExact(name);
 
-        // Retry without colon suffix (e.g. "Alien: Isolation" → "Alien")
         if (!game && name.includes(':') && !isEpisodicTitle(name)) {
             const short = name.split(':')[0].trim();
             if (short.length >= 4) {
@@ -278,7 +291,6 @@ async function resolveIgdbIdByName(title) {
             }
         }
 
-        // Fuzzy fallback
         if (!game) {
             console.log(`[IGDB] falling back to fuzzy search for "${name}"`);
             game = await searchFuzzy(name);
@@ -327,15 +339,12 @@ async function fetchIgdbGameData(igdbId) {
         ? new Date(g.first_release_date * 1000).getFullYear()
         : null;
 
-    // IGDB image URL builder — use image_id for reliability
     const imgUrl = (image_id, size = '720p') =>
         image_id ? `https://images.igdb.com/igdb/image/upload/t_${size}/${image_id}.jpg` : null;
 
     const cover = g.cover?.image_id
         ? { url: imgUrl(g.cover.image_id, '720p'), width: g.cover.width || null, height: g.cover.height || null }
         : null;
-
-    // logo fetched separately via _fetchIgdbLogo() — see parallel call below
 
     const artworks = (g.artworks || []).map(a => ({
         url: imgUrl(a.image_id, '1080p'), width: a.width || null, height: a.height || null,
@@ -374,16 +383,9 @@ async function fetchIgdbGameData(igdbId) {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Resolve IGDB game ID:
- *   1. By external uid — Steam only
- *   2. Fallback: by title search (with Demo/Chapter stripping)
- */
 async function resolveIgdbGameId(platform, externalId, title) {
-    // UID lookup — Steam only
     let igdbId = await resolveIgdbIdByUid(platform, externalId);
 
-    // Fallback to name search
     if (!igdbId && title) {
         console.log(`[IGDB] falling back to name search: "${title}"`);
         igdbId = await resolveIgdbIdByName(title);
@@ -392,9 +394,6 @@ async function resolveIgdbGameId(platform, externalId, title) {
     return igdbId;
 }
 
-/**
- * Resolve IGDB ID then fetch full game data.
- */
 async function resolveAndFetch(platform, externalId, title) {
     const igdbId = await resolveIgdbGameId(platform, externalId, title);
     if (!igdbId) return null;

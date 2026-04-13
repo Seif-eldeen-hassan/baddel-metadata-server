@@ -34,7 +34,7 @@ const enrichEmitter = new EventEmitter();
 enrichEmitter.setMaxListeners(100);
 
 // ─── Pipeline tunables ────────────────────────────────────────────────────────
-const LOOKUP_CONCURRENCY  = 8;   // IGDB allows ~4 req/s; each game ≈ 2 calls → 8 games safe
+const LOOKUP_CONCURRENCY  = 3;   // igdbResolver throttles to 3 req/s; 3 games × ~2 calls = 6 slots/s max → safe
 const BUFFER_MAX          = 15;  // max resolved items waiting for Phase 2
 const PROMOTE_BATCH_SIZE  = 5;   // images promoted per batch in nightly cron (keeps Sharp memory low)
 const PROMOTE_DELAY_MS    = 500; // pause between cron batches
