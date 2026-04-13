@@ -20,9 +20,12 @@ app.use(express.json({ limit: '10mb' }));
 // 1 sequential save — no R2 in hot path).
 //
 const _enrichQueue   = [];
+const _enqueuedIds   = new Set();
 let   _enrichRunning = false;
 
 function _enqueue(item) {
+    if (!item.gameId || _enqueuedIds.has(item.gameId)) return; // ← ADD THIS
+    _enqueuedIds.add(item.gameId);
     _enrichQueue.push(item);
 }
 
@@ -31,6 +34,7 @@ async function _drainQueue() {
     _enrichRunning = true;
 
     const items = _enrichQueue.splice(0);
+    items.forEach(i => _enqueuedIds.delete(i.gameId));
     console.log(`[Queue] Draining ${items.length} games`);
 
     try {
