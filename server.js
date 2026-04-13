@@ -2,8 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const db      = require('./db');
-const { resolveSteamGame, resolveEpicGame }              = require('./services/coverResolver');
-const { enrichGame, enrichGamesBatch, enrichEmitter }    = require('./services/enrichGame');
+const { resolveSteamGame, resolveEpicGame }                          = require('./services/coverResolver');
+const { enrichGame, enrichGamesBatch, enrichEmitter,
+        promotePendingImages }                                        = require('./services/enrichGame');
+
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const app = express();
@@ -15,25 +17,21 @@ app.use(express.json({ limit: '10mb' }));
 // Items accumulate here while fetchAndSaveGames() is still running.
 // Once fetchAndSaveGames finishes, we drain the whole queue at once using
 // enrichGamesBatch() which runs the bounded pipeline (8 parallel lookups,
-// 1 sequential upload).
+// 1 sequential save — no R2 in hot path).
 //
-// We never drain mid-save — we wait for the full batch so enrichGamesBatch
-// has the complete list and can pipeline efficiently.
-//
-const _enrichQueue  = [];
+const _enrichQueue   = [];
 let   _enrichRunning = false;
 
 function _enqueue(item) {
     _enrichQueue.push(item);
 }
 
-// Called once after fetchAndSaveGames() finishes — drains the whole queue
 async function _drainQueue() {
     if (_enrichRunning || _enrichQueue.length === 0) return;
     _enrichRunning = true;
 
-    const items = _enrichQueue.splice(0); // take all items at once
-    console.log(`[Queue] Draining ${items.length} games via bounded pipeline`);
+    const items = _enrichQueue.splice(0);
+    console.log(`[Queue] Draining ${items.length} games`);
 
     try {
         await enrichGamesBatch(items);
@@ -43,7 +41,6 @@ async function _drainQueue() {
 
     _enrichRunning = false;
 
-    // In case more items arrived while we were running (e.g. manual enrich calls)
     if (_enrichQueue.length > 0) _drainQueue();
 }
 
@@ -64,18 +61,6 @@ app.get('/health', async (req, res) => {
 });
 
 // ─── SSE: Enrichment Stream ────────────────────────────────────────────────────
-//
-// GET /games/enrich-stream
-//
-// Client opens ONE persistent connection after importing a batch.
-// Server pushes one event per game as it finishes enrichment.
-//
-// Events:
-//   event: enriched   → data: { gameId, externalId, cover, hero, logo, hasMetadata }
-//   event: error      → data: { gameId, externalId, error }
-//   event: batch_done → data: { count }
-//   :ping             → heartbeat every 25s
-//
 app.get('/games/enrich-stream', (req, res) => {
     res.setHeader('Content-Type',      'text/event-stream');
     res.setHeader('Cache-Control',     'no-cache');
@@ -187,20 +172,24 @@ app.post('/games/import', async (req, res) => {
     }));
 
     res.status(200).json({
-        status: 'success', found, pending,
+        status: 'success',
+        found,
+        pending,
         summary: { total: games.length, found: found.length, pending: pending.length },
     });
 
     if (pending.length > 0) {
-        console.log(`[Import] ${pending.length} pending — saving + queuing for pipeline`);
-        // fetchAndSaveGames enqueues each game as it's saved, then drains all at once
         fetchAndSaveGames(pending).catch(err =>
             console.error('[Import] Background error:', err.message)
         );
     }
 });
 
-// ─── Save new games + cover, enqueue for pipeline ─────────────────────────────
+// ─── Save new games + raw cover URL, enqueue for enrichment ───────────────────
+//
+// No Sharp, no R2 here — we just probe the cover URL and store it raw.
+// cdn_url will be NULL until the nightly cron promotes it.
+//
 async function fetchAndSaveGames(pending) {
     for (const item of pending) {
         try {
@@ -208,19 +197,18 @@ async function fetchAndSaveGames(pending) {
                     cover_url, hero_url, entry_type: payloadType, epic_metadata } = item;
             const ns = platform === 'steam' ? 'app_id' : 'catalog_namespace';
 
-            let title = payloadTitle || null, entry_type = payloadType || 'game';
-            let sourceUrl = null, cdnUrl = null;
+            let title = payloadTitle || null;
+            let entry_type = payloadType || 'game';
+            let sourceUrl = null;
 
             if (platform === 'steam') {
                 const r = await resolveSteamGame(id);
                 if (!title)      title      = r.title;
                 if (!entry_type) entry_type = r.entry_type;
-                sourceUrl = r.sourceUrl;
-                cdnUrl    = r.cdnUrl;
+                sourceUrl = r.sourceUrl;  // raw URL — no upload
             } else {
                 const r = await resolveEpicGame(id, cover_url);
-                sourceUrl = r.sourceUrl;
-                cdnUrl    = r.cdnUrl;
+                sourceUrl = r.sourceUrl;  // raw URL — no upload
             }
 
             const slugFromTitle = title
@@ -245,17 +233,19 @@ async function fetchAndSaveGames(pending) {
                 [gameId, platform, ns, id]
             );
 
-            if (cdnUrl) {
+            // Store raw cover URL — cdn_url stays NULL until nightly cron
+            if (sourceUrl) {
                 await db.query(
                     `INSERT INTO game_images (game_id, source, image_type, url, cdn_url, sort_order)
-                     VALUES ($1, $2, 'cover', $3, $4, 0) ON CONFLICT DO NOTHING`,
-                    [gameId, platform, sourceUrl, cdnUrl]
+                     VALUES ($1, $2, 'cover', $3, NULL, 0) ON CONFLICT DO NOTHING`,
+                    [gameId, platform, sourceUrl]
                 );
-                console.log(`[Cover] ✅ ${platform}:${id}`);
+                console.log(`[Cover] ✅ raw URL saved ${platform}:${id}`);
             } else {
-                console.warn(`[Cover] ⚠️  No cover for ${platform}:${id}`);
+                console.warn(`[Cover] ⚠️  No cover URL found for ${platform}:${id}`);
             }
 
+            // Epic basic metadata from payload
             if (platform === 'epic' && epic_metadata) {
                 try {
                     if (hero_url && !epic_metadata._heroUrl) epic_metadata._heroUrl = hero_url;
@@ -287,18 +277,15 @@ async function fetchAndSaveGames(pending) {
                 }
             }
 
-            // Enqueue — pipeline starts only after ALL games are saved (see below)
             _enqueue({ gameId, platform, externalId: id, clientData: item });
 
         } catch (err) {
             console.error(`[Cover] ❌ ${item.platform}:${item.id} —`, err.message);
         }
 
-        await delay(1500);
+        await delay(300); // much shorter — no R2 round-trip to wait for
     }
 
-    // All games saved → drain the whole queue at once so the pipeline
-    // gets the complete list and can overlap lookups with uploads efficiently
     _drainQueue();
 }
 
@@ -372,6 +359,52 @@ app.post('/games/enrich', async (req, res) => {
 
     for (const t of targets) _enqueue({ gameId: t.gameId, platform: t.platform, externalId: t.externalId, clientData: {} });
     _drainQueue();
+});
+
+// ─── Nightly Cron: Promote raw URLs → WebP → R2 ───────────────────────────────
+//
+// POST /jobs/promote-images
+//
+// Finds all game_images rows where cdn_url IS NULL,
+// converts each to WebP via Sharp, uploads to R2, updates cdn_url.
+//
+// Trigger this at 00:00 daily from a Railway cron job or an external scheduler
+// (e.g. cron-job.org, GitHub Actions, Render cron).
+//
+// Optional body: { "limit": 500 }  — max images to process per run (default 500)
+// Optional header: X-Cron-Secret: <your secret>  — protects the endpoint
+//
+app.post('/jobs/promote-images', async (req, res) => {
+    // Simple secret check — set CRON_SECRET in Railway env vars
+    const secret = process.env.CRON_SECRET;
+    if (secret && req.headers['x-cron-secret'] !== secret) {
+        return res.status(401).json({ status: 'error', message: 'Unauthorized' });
+    }
+
+    // Respond immediately — job runs in background
+    res.status(202).json({ status: 'accepted', message: 'Image promotion started in background' });
+
+    const limit = Number(req.body?.limit) || 500;
+
+    promotePendingImages(limit)
+        .then(result => console.log('[Cron] promote-images done:', result))
+        .catch(err   => console.error('[Cron] promote-images error:', err.message));
+});
+
+// ─── Promote status check ─────────────────────────────────────────────────────
+//
+// GET /jobs/promote-images/status
+// Returns count of images still pending R2 promotion.
+//
+app.get('/jobs/promote-images/status', async (req, res) => {
+    try {
+        const { rows } = await db.query(
+            `SELECT COUNT(*) AS pending FROM game_images WHERE cdn_url IS NULL AND url IS NOT NULL`
+        );
+        res.status(200).json({ status: 'success', pending: Number(rows[0].pending) });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
 });
 
 // ─── Start ─────────────────────────────────────────────────────────────────────
