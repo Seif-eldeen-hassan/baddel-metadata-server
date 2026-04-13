@@ -2,17 +2,52 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const db      = require('./db');
-const { resolveSteamGame, resolveEpicGame }   = require('./services/coverResolver');
-const { enrichGame, enrichGames }             = require('./services/enrichGame');
-const { buildCoverKey, uploadImageToR2 }      = require('./services/r2');
+const { resolveSteamGame, resolveEpicGame }              = require('./services/coverResolver');
+const { enrichGame, enrichGamesBatch, enrichEmitter }    = require('./services/enrichGame');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-app.use(express.json());
 
-// ─── Health Check ─────────────────────────────────────────────
+// ─── Enrich Queue ──────────────────────────────────────────────────────────────
+//
+// Items accumulate here while fetchAndSaveGames() is still running.
+// Once fetchAndSaveGames finishes, we drain the whole queue at once using
+// enrichGamesBatch() which runs the bounded pipeline (8 parallel lookups,
+// 1 sequential upload).
+//
+// We never drain mid-save — we wait for the full batch so enrichGamesBatch
+// has the complete list and can pipeline efficiently.
+//
+const _enrichQueue  = [];
+let   _enrichRunning = false;
+
+function _enqueue(item) {
+    _enrichQueue.push(item);
+}
+
+// Called once after fetchAndSaveGames() finishes — drains the whole queue
+async function _drainQueue() {
+    if (_enrichRunning || _enrichQueue.length === 0) return;
+    _enrichRunning = true;
+
+    const items = _enrichQueue.splice(0); // take all items at once
+    console.log(`[Queue] Draining ${items.length} games via bounded pipeline`);
+
+    try {
+        await enrichGamesBatch(items);
+    } catch (err) {
+        console.error('[Queue] Pipeline error:', err.message);
+    }
+
+    _enrichRunning = false;
+
+    // In case more items arrived while we were running (e.g. manual enrich calls)
+    if (_enrichQueue.length > 0) _drainQueue();
+}
+
+// ─── Health ────────────────────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
     try {
         const result = await db.query('SELECT NOW()');
@@ -20,17 +55,59 @@ app.get('/health', async (req, res) => {
             status:        'success',
             message:       'Baddel Metadata Server is running smoothly!',
             database_time: result.rows[0].now,
+            queue_length:  _enrichQueue.length,
+            queue_running: _enrichRunning,
         });
     } catch (error) {
-        res.status(500).json({
-            status:  'error',
-            message: 'Server is running, but Database connection failed.',
-            error:   error.message,
-        });
+        res.status(500).json({ status: 'error', message: 'Database connection failed.', error: error.message });
     }
 });
 
-// ─── Game Lookup ───────────────────────────────────────────────
+// ─── SSE: Enrichment Stream ────────────────────────────────────────────────────
+//
+// GET /games/enrich-stream
+//
+// Client opens ONE persistent connection after importing a batch.
+// Server pushes one event per game as it finishes enrichment.
+//
+// Events:
+//   event: enriched   → data: { gameId, externalId, cover, hero, logo, hasMetadata }
+//   event: error      → data: { gameId, externalId, error }
+//   event: batch_done → data: { count }
+//   :ping             → heartbeat every 25s
+//
+app.get('/games/enrich-stream', (req, res) => {
+    res.setHeader('Content-Type',      'text/event-stream');
+    res.setHeader('Cache-Control',     'no-cache');
+    res.setHeader('Connection',        'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const send = (event, data) => {
+        try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+
+    const onDone      = (data) => send('enriched',   data);
+    const onError     = (data) => send('error',      data);
+    const onBatchDone = (data) => send('batch_done', data);
+
+    enrichEmitter.on('done',       onDone);
+    enrichEmitter.on('error',      onError);
+    enrichEmitter.on('batch_done', onBatchDone);
+
+    const heartbeat = setInterval(() => {
+        try { res.write(':ping\n\n'); } catch { clearInterval(heartbeat); }
+    }, 25000);
+
+    req.on('close', () => {
+        enrichEmitter.off('done',       onDone);
+        enrichEmitter.off('error',      onError);
+        enrichEmitter.off('batch_done', onBatchDone);
+        clearInterval(heartbeat);
+    });
+});
+
+// ─── Game Lookup ───────────────────────────────────────────────────────────────
 app.get('/games/lookup', async (req, res) => {
     const { uuid, platform, namespace, id, slug, title } = req.query;
 
@@ -53,15 +130,10 @@ app.get('/games/lookup', async (req, res) => {
             const r = await db.query(`SELECT id FROM games WHERE lower(title)=lower($1)`, [title]);
             if (r.rows.length) gameId = r.rows[0].id;
         } else {
-            return res.status(400).json({
-                status:  'error',
-                message: 'Provide at least one of: uuid, platform+namespace+id, slug, title',
-            });
+            return res.status(400).json({ status: 'error', message: 'Provide uuid, platform+namespace+id, slug, or title' });
         }
 
-        if (!gameId) {
-            return res.status(404).json({ status: 'not_found', message: 'Game not found' });
-        }
+        if (!gameId) return res.status(404).json({ status: 'not_found', message: 'Game not found' });
 
         const [gameRes, platformRes, imagesRes, mediaRes, ratingsRes, metadataRes, sysreqRes] =
             await Promise.all([
@@ -88,122 +160,75 @@ app.get('/games/lookup', async (req, res) => {
         });
     } catch (error) {
         console.error('Lookup error:', error);
-        res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+        res.status(500).json({ status: 'error', message: error.message });
     }
 });
 
-// ─── Games Import ──────────────────────────────────────────────
-//
-// Steam payload:
-// {
-//   "platform": "steam",
-//   "games": [
-//     { "id": "292030", "title": "The Witcher 3", "slug": "the-witcher-3" }
-//   ]
-// }
-//
-// Epic payload:
-// {
-//   "platform": "epic",
-//   "games": [
-//     {
-//       "id": "27834480410d4000a987b32801e9abba",   ← catalog namespace
-//       "title": "First Class Trouble",
-//       "slug": "first-class-trouble",
-//       "cover_url": "https://cdn1.epicgames.com/...",  ← DieselGameBoxTall (1200x1600)
-//       "hero_url":  "https://cdn1.epicgames.com/...",  ← DieselGameBox     (2560x1440)
-//       "entry_type": "game"                            ← from categories
-//     }
-//   ]
-// }
-
+// ─── Games Import ──────────────────────────────────────────────────────────────
 app.post('/games/import', async (req, res) => {
     const { platform, games } = req.body;
 
     if (!platform || !Array.isArray(games) || games.length === 0) {
-        return res.status(400).json({
-            status:  'error',
-            message: 'Provide platform and a non-empty games array',
-        });
+        return res.status(400).json({ status: 'error', message: 'Provide platform and a non-empty games array' });
     }
 
-    const found   = [];
-    const pending = [];
+    const found = [], pending = [];
 
     await Promise.all(games.map(async (game) => {
-        const { id } = game;
-        if (!id) return;
-
-        // namespace differs per platform
+        if (!game.id) return;
         const ns = platform === 'steam' ? 'app_id' : 'catalog_namespace';
-
         const result = await db.query(
             `SELECT g.* FROM games g
              JOIN platform_ids p ON p.game_id = g.id
              WHERE p.platform=$1 AND p.namespace=$2 AND p.external_id=$3`,
-            [platform, ns, id]
+            [platform, ns, game.id]
         );
-
-        if (result.rows.length) {
-            found.push(result.rows[0]);
-        } else {
-            pending.push({ ...game, platform });
-        }
+        result.rows.length ? found.push(result.rows[0]) : pending.push({ ...game, platform });
     }));
 
-    // Respond immediately — cover fetch runs in background
     res.status(200).json({
-        status:  'success',
-        found,
-        pending,
+        status: 'success', found, pending,
         summary: { total: games.length, found: found.length, pending: pending.length },
     });
 
     if (pending.length > 0) {
-        console.log(`[Import] ${pending.length} pending — fetching covers in background...`);
+        console.log(`[Import] ${pending.length} pending — saving + queuing for pipeline`);
+        // fetchAndSaveGames enqueues each game as it's saved, then drains all at once
         fetchAndSaveGames(pending).catch(err =>
             console.error('[Import] Background error:', err.message)
         );
     }
 });
 
-// ─── Background Job ────────────────────────────────────────────
+// ─── Save new games + cover, enqueue for pipeline ─────────────────────────────
 async function fetchAndSaveGames(pending) {
     for (const item of pending) {
         try {
-            const { platform, id, title: payloadTitle, slug: payloadSlug, cover_url, hero_url, entry_type: payloadType, epic_metadata } = item;
+            const { platform, id, title: payloadTitle, slug: payloadSlug,
+                    cover_url, hero_url, entry_type: payloadType, epic_metadata } = item;
             const ns = platform === 'steam' ? 'app_id' : 'catalog_namespace';
 
-            // ── 1. Resolve cover + metadata ──────────────────
-            let title      = payloadTitle  || null;
-            let entry_type = payloadType   || 'game';
-            let sourceUrl  = null;
-            let cdnUrl     = null;
+            let title = payloadTitle || null, entry_type = payloadType || 'game';
+            let sourceUrl = null, cdnUrl = null;
 
             if (platform === 'steam') {
-                const result = await resolveSteamGame(id);
-                // Steam API fills in title + entry_type when not provided
-                if (!title)      title      = result.title;
-                if (!entry_type) entry_type = result.entry_type;
-                sourceUrl = result.sourceUrl;
-                cdnUrl    = result.cdnUrl;
+                const r = await resolveSteamGame(id);
+                if (!title)      title      = r.title;
+                if (!entry_type) entry_type = r.entry_type;
+                sourceUrl = r.sourceUrl;
+                cdnUrl    = r.cdnUrl;
             } else {
-                // Epic: cover + hero already in payload
-                const result = await resolveEpicGame(id, cover_url);
-                sourceUrl = result.sourceUrl;
-                cdnUrl    = result.cdnUrl;
+                const r = await resolveEpicGame(id, cover_url);
+                sourceUrl = r.sourceUrl;
+                cdnUrl    = r.cdnUrl;
             }
 
-            // ── 2. Build slug ─────────────────────────────────
             const slugFromTitle = title
                 ? title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, '-')
                 : null;
             const slug = payloadSlug || slugFromTitle || `${platform}-${id}`;
-
-            // Fallback title if still null
             if (!title) title = slug;
 
-            // ── 3. Upsert game ────────────────────────────────
             const gameRes = await db.query(
                 `INSERT INTO games (slug, title, entry_type)
                  VALUES ($1, $2, $3)
@@ -214,53 +239,31 @@ async function fetchAndSaveGames(pending) {
             );
             const gameId = gameRes.rows[0].id;
 
-            // ── 4. Upsert platform_id ─────────────────────────
             await db.query(
                 `INSERT INTO platform_ids (game_id, platform, namespace, external_id)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (platform, namespace, external_id) DO NOTHING`,
+                 VALUES ($1, $2, $3, $4) ON CONFLICT (platform, namespace, external_id) DO NOTHING`,
                 [gameId, platform, ns, id]
             );
 
-            // ── 5. Save cover in game_images ──────────────────
             if (cdnUrl) {
                 await db.query(
                     `INSERT INTO game_images (game_id, source, image_type, url, cdn_url, sort_order)
-                     VALUES ($1, $2, 'cover', $3, $4, 0)
-                     ON CONFLICT DO NOTHING`,
+                     VALUES ($1, $2, 'cover', $3, $4, 0) ON CONFLICT DO NOTHING`,
                     [gameId, platform, sourceUrl, cdnUrl]
                 );
-                console.log(`[Cover] ✅ ${platform}:${id} → ${cdnUrl}`);
+                console.log(`[Cover] ✅ ${platform}:${id}`);
             } else {
                 console.warn(`[Cover] ⚠️  No cover for ${platform}:${id}`);
             }
 
-            // ── 6. Epic hero is intentionally NOT saved here ──────────────────
-            // Hero resolution order (handled by enrichGame.js):
-            //   1. SteamGridDB  2. IGDB artworks  3. Epic hero (last resort)
-            // Saving the Epic hero here would make enrichGame think it's already
-            // resolved and skip the SGDB/IGDB lookups entirely.
-            // The epic hero_url is stored in epic_metadata._heroUrl as a fallback hint.
-
-            // ── 7. Store Epic metadata from Legendary disk cache ──────────────
-            // Saved as source='epic' in game_metadata so enrich pipeline can use
-            // developer, description, creationDate as fallbacks when IGDB fails.
             if (platform === 'epic' && epic_metadata) {
                 try {
-                    // Store hero_url as a fallback hint for enrichGame.js
-                    if (hero_url && !epic_metadata._heroUrl) {
-                        epic_metadata._heroUrl = hero_url;
-                    }
-
-                    const epicDev  = epic_metadata.developer   || null;
+                    if (hero_url && !epic_metadata._heroUrl) epic_metadata._heroUrl = hero_url;
+                    const epicDev  = epic_metadata.developer || null;
                     const rawDesc  = epic_metadata.description || null;
-                    // Skip description if it's just the game title repeated
-                    const epicDesc = rawDesc && rawDesc.toLowerCase() !== (title || '').toLowerCase()
-                        ? rawDesc
-                        : null;
+                    const epicDesc = rawDesc && rawDesc.toLowerCase() !== (title || '').toLowerCase() ? rawDesc : null;
                     const epicYear = epic_metadata.creationDate
-                        ? new Date(epic_metadata.creationDate).getFullYear() || null
-                        : null;
+                        ? new Date(epic_metadata.creationDate).getFullYear() || null : null;
 
                     if (epicDev || epicDesc) {
                         await db.query(
@@ -273,46 +276,41 @@ async function fetchAndSaveGames(pending) {
                             [gameId, epicDesc, epicDev]
                         );
                     }
-
-                    // Store creationDate year as release_year fallback
                     if (epicYear) {
                         await db.query(
                             `UPDATE games SET release_year=COALESCE(release_year,$2), updated_at=now() WHERE id=$1`,
                             [gameId, epicYear]
                         );
                     }
-
-                    console.log(`[Meta]  ✅ epic:${id} — developer="${epicDev}" year=${epicYear}`);
                 } catch (err) {
-                    console.warn(`[Meta]  ⚠️  epic_metadata save failed for ${id}:`, err.message);
+                    console.warn(`[Meta] epic_metadata save failed for ${id}:`, err.message);
                 }
             }
+
+            // Enqueue — pipeline starts only after ALL games are saved (see below)
+            _enqueue({ gameId, platform, externalId: id, clientData: item });
 
         } catch (err) {
             console.error(`[Cover] ❌ ${item.platform}:${item.id} —`, err.message);
         }
+
         await delay(1500);
     }
+
+    // All games saved → drain the whole queue at once so the pipeline
+    // gets the complete list and can overlap lookups with uploads efficiently
+    _drainQueue();
 }
 
-// ─── Enrich Single Game ────────────────────────────────────────
-//
-// POST /games/enrich/:gameId
-// Enriches one game that already exists in the DB.
-// Looks up its platform_ids, then pulls IGDB + SteamGridDB data.
-//
-// Optional body: { "background": true }  → respond immediately, run in background
-//
+// ─── Enrich Single Game ────────────────────────────────────────────────────────
 app.post('/games/enrich/:gameId', async (req, res) => {
-    const { gameId }    = req.params;
-    const background    = req.body?.background === true;
+    const { gameId } = req.params;
+    const background = req.body?.background === true;
 
-    // Pull platform_ids for this game
     let pidRows;
     try {
         const r = await db.query(
-            `SELECT platform, namespace, external_id FROM platform_ids WHERE game_id=$1`,
-            [gameId]
+            `SELECT platform, namespace, external_id FROM platform_ids WHERE game_id=$1`, [gameId]
         );
         pidRows = r.rows;
     } catch (err) {
@@ -320,25 +318,17 @@ app.post('/games/enrich/:gameId', async (req, res) => {
     }
 
     if (!pidRows.length) {
-        return res.status(404).json({
-            status: 'not_found',
-            message: 'Game not found or has no platform_ids',
-        });
+        return res.status(404).json({ status: 'not_found', message: 'Game not found or has no platform_ids' });
     }
 
-    // Prefer steam, then epic, then whatever exists
-    const pid =
-        pidRows.find(p => p.platform === 'steam') ||
-        pidRows.find(p => p.platform === 'epic')  ||
-        pidRows[0];
-
+    const pid = pidRows.find(p => p.platform === 'steam') ||
+                pidRows.find(p => p.platform === 'epic')  || pidRows[0];
     const { platform, external_id: externalId } = pid;
 
     if (background) {
-        res.status(202).json({ status: 'accepted', message: 'Enrichment started in background', gameId });
-        enrichGame(gameId, platform, externalId, req.body).catch(err =>
-            console.error('[Enrich] Background error:', err.message)
-        );
+        res.status(202).json({ status: 'accepted', message: 'Queued for enrichment', gameId });
+        _enqueue({ gameId, platform, externalId, clientData: req.body });
+        _drainQueue();
     } else {
         try {
             const result = await enrichGame(gameId, platform, externalId, req.body);
@@ -349,86 +339,42 @@ app.post('/games/enrich/:gameId', async (req, res) => {
     }
 });
 
-// ─── Enrich Batch ──────────────────────────────────────────────
-//
-// POST /games/enrich
-// Enrich multiple games at once (always runs in background).
-//
-// Body:
-// {
-//   "gameIds": ["uuid1", "uuid2", ...]          ← enrich specific games
-// }
-// OR:
-// {
-//   "enrichAll": true,                           ← enrich ALL games with no igdb metadata yet
-//   "limit": 50                                  ← optional cap (default 100)
-// }
-//
+// ─── Enrich Batch ──────────────────────────────────────────────────────────────
 app.post('/games/enrich', async (req, res) => {
     const { gameIds, enrichAll, limit = 100 } = req.body || {};
-
     let targets = [];
 
     try {
         if (enrichAll) {
-            // Find games that haven't been enriched from IGDB yet
             const r = await db.query(
                 `SELECT g.id AS game_id, p.platform, p.external_id
-                 FROM games g
-                 JOIN platform_ids p ON p.game_id = g.id
+                 FROM games g JOIN platform_ids p ON p.game_id = g.id
                  WHERE p.platform IN ('steam','epic')
-                   AND NOT EXISTS (
-                       SELECT 1 FROM game_metadata m
-                       WHERE m.game_id = g.id AND m.source = 'igdb'
-                   )
-                 ORDER BY g.created_at DESC
-                 LIMIT $1`,
-                [limit]
+                   AND NOT EXISTS (SELECT 1 FROM game_metadata m WHERE m.game_id = g.id AND m.source = 'igdb')
+                 ORDER BY g.created_at DESC LIMIT $1`, [limit]
             );
-            targets = r.rows.map(row => ({
-                gameId:     row.game_id,
-                platform:   row.platform,
-                externalId: row.external_id,
-            }));
+            targets = r.rows.map(row => ({ gameId: row.game_id, platform: row.platform, externalId: row.external_id }));
         } else if (Array.isArray(gameIds) && gameIds.length) {
             const r = await db.query(
                 `SELECT g.id AS game_id, p.platform, p.external_id
-                 FROM games g
-                 JOIN platform_ids p ON p.game_id = g.id
-                 WHERE g.id = ANY($1::uuid[])
-                   AND p.platform IN ('steam','epic')`,
-                [gameIds]
+                 FROM games g JOIN platform_ids p ON p.game_id = g.id
+                 WHERE g.id = ANY($1::uuid[]) AND p.platform IN ('steam','epic')`, [gameIds]
             );
-            targets = r.rows.map(row => ({
-                gameId:     row.game_id,
-                platform:   row.platform,
-                externalId: row.external_id,
-            }));
+            targets = r.rows.map(row => ({ gameId: row.game_id, platform: row.platform, externalId: row.external_id }));
         } else {
-            return res.status(400).json({
-                status:  'error',
-                message: 'Provide gameIds array OR enrichAll:true',
-            });
+            return res.status(400).json({ status: 'error', message: 'Provide gameIds array OR enrichAll:true' });
         }
     } catch (err) {
         return res.status(500).json({ status: 'error', message: err.message });
     }
 
-    res.status(202).json({
-        status:  'accepted',
-        message: `Enriching ${targets.length} games in background`,
-        count:   targets.length,
-    });
+    res.status(202).json({ status: 'accepted', message: `Queued ${targets.length} games`, count: targets.length });
 
-    if (targets.length > 0) {
-        console.log(`[Enrich] Batch: ${targets.length} games queued`);
-        enrichGames(targets).catch(err =>
-            console.error('[Enrich] Batch error:', err.message)
-        );
-    }
+    for (const t of targets) _enqueue({ gameId: t.gameId, platform: t.platform, externalId: t.externalId, clientData: {} });
+    _drainQueue();
 });
 
-// ─── Start ─────────────────────────────────────────────────────
+// ─── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`=================================`);
