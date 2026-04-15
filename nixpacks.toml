@@ -3,9 +3,10 @@ nixPkgs = ["nodejs_18", "python3", "python3Packages.pip", "gcc"]
 
 [phases.install]
 cmds = [
-    "npm install --legacy-peer-deps", 
-    "pip3 install -r requirements.txt"
+    "npm install --legacy-peer-deps",
+    "python3 -m venv .venv",
+    ".venv/bin/pip install -r requirements.txt"
 ]
 
 [start]
-cmd = "npm start"
+cmd = ". .venv/bin/activate && npm start"
