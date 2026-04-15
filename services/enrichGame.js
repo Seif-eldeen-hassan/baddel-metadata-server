@@ -84,18 +84,22 @@ async function upsertMetadata(gameId, data, source = 'igdb') {
 
 async function upsertRating(gameId, rating) {
     if (!rating?.score) return;
+    
+    // لو مفيش max_score مبعوت (زي IGDB)، هنعتبره 100
+    const maxScore = rating.max_score || 100;
+
     await db.query(
         `INSERT INTO game_ratings
              (game_id, source, score, max_score, total_reviews)
-         VALUES ($1,$2,$3,100,$4)
+         VALUES ($1,$2,$3,$4,$5)
          ON CONFLICT (game_id, source) DO UPDATE SET
              score         = EXCLUDED.score,
+             max_score     = EXCLUDED.max_score,
              total_reviews = EXCLUDED.total_reviews,
              fetched_at    = now()`,
-        [gameId, rating.source, Math.round(rating.score * 10) / 10, rating.count || null]
+        [gameId, rating.source, Math.round(rating.score * 10) / 10, maxScore, rating.count || null]
     );
 }
-
 async function upsertVideos(gameId, videos) {
     for (let i = 0; i < videos.length; i++) {
         const v = videos[i];
@@ -260,12 +264,16 @@ async function _lookupOnly(item) {
 
     if (platform === 'epic' && epicPythonData) {
         coverSource = epicPythonData.cover || sgdbData.cover?.url || null;
-        logoSource  = epicPythonData.logo  || sgdbData.logo?.url  || null;
+        
+        // 🌟 التعديل هنا: الأولوية للوجو الخارجي (SGDB) عشان جودته، ولو مش موجود أو الـ Confidence ضعيفة ياخد Epic، ولو مفيش ياخد IGDB
+        logoSource  = sgdbData.logo?.url || epicPythonData.logo || igdbData?.images?.logo?.url || null;
         
         heroSource  = sgdbData.hero?.url || epicPythonData.hero || null;
     } else {
         coverSource = sgdbData.cover?.url || igdbData?.images?.cover?.url || null;
         heroSource  = sgdbData.hero?.url || igdbData?.images?.artworks?.[0]?.url || null;
+        
+        // هنا ستيم بيفضل زي ما هو: SteamGridDB الأول، ولو مفيش ياخد IGDB
         logoSource  = sgdbData.logo?.url || igdbData?.images?.logo?.url || null;
     }
 
@@ -381,9 +389,13 @@ async function _saveRawUrls(resolved) {
         }
 
         // 4. تنفيذ كل عمليات الإدخال للداتا بيز
+        // 4. تنفيذ كل عمليات الإدخال للداتا بيز
         const epicPromises = [
             upsertMetadata(gameId, epicPythonData, 'epic'),
-            epicPythonData.avg_rating > 0 ? upsertRating(gameId, { score: epicPythonData.avg_rating * 10, source: 'epic' }) : Promise.resolve(),
+            
+            // التعديل هنا: هنبعت السكور زي ما هو (من غير ما نضربه في 10) ونحدد إن الـ max_score بـ 5
+            epicPythonData.avg_rating > 0 ? upsertRating(gameId, { score: epicPythonData.avg_rating, max_score: 5, source: 'epic' }) : Promise.resolve(),
+            
             upsertVideos(gameId, mappedTrailers),
             updateGameMeta(gameId, { releaseYear: epicPythonData.release_year }),
         ];
