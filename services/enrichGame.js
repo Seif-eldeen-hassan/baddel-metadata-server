@@ -345,21 +345,20 @@ async function _saveRawUrls(resolved) {
     
     // ─── Epic Python Metadata ──
     if (epicPythonData && platform === 'epic') {
-        // 1. تحويل الـ Features لـ Tags عشان الـ DB تقراها صح
+        // 1. تحويل الـ Features لـ Tags
         epicPythonData.tags = epicPythonData.features || [];
 
-        // 2. تظبيط الفيديوهات (لأنها بترجع من البايثون كـ Array of Strings مش Objects)
+        // 2. تظبيط الفيديوهات
         const mappedTrailers = (epicPythonData.trailers || []).map(t => {
             const videoUrl = typeof t === 'string' ? t : t?.video;
             const thumbUrl = typeof t === 'string' ? null : t?.thumbnail;
             return { url: videoUrl, thumb: thumbUrl, title: 'Epic Trailer' };
         });
 
-        // 3. تحضير متطلبات التشغيل (System Requirements) للشكل اللي بتقبله الداتا بيز
+        // 3. تحضير متطلبات التشغيل
         const epicSysreqs = [];
         if (epicPythonData.requirements?.systems) {
             for (const [osName, tiers] of Object.entries(epicPythonData.requirements.systems)) {
-                // توحيد اسم النظام (Windows -> win)
                 const platformMap = { 'Windows': 'win', 'Mac': 'mac', 'Linux': 'linux' };
                 const dbPlatform = platformMap[osName] || osName.toLowerCase();
 
@@ -367,7 +366,8 @@ async function _saveRawUrls(resolved) {
                     if (!reqs) continue;
                     epicSysreqs.push({
                         platform: dbPlatform,
-                        tier: tierName === 'minimum' ? 'min' : 'rec', // min or rec
+                        // التعديل هنا: هنبعت tierName زي ما هو ('minimum' أو 'recommended') عشان الـ DB تقبله
+                        tier: tierName, 
                         os_versions: reqs.OS || null,
                         cpu: reqs.Processor || null,
                         gpu: reqs.Graphics || null,
