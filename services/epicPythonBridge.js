@@ -19,13 +19,21 @@ async function fetchEpicDataFromPython(target) {
                 return resolve(null);
             }
             
+            // تنظيف النتيجة من أي مسافات فاضية
+            const cleanStdout = stdout.trim();
+            
+            // لو السكربت مرجعش حاجة (اللعبة مش موجودة)
+            if (!cleanStdout) {
+                console.warn(`[EpicBridge] No data found on Epic for: "${target}"`);
+                return resolve(null);
+            }
+            
             try {
-                const data = JSON.parse(stdout);
+                const data = JSON.parse(cleanStdout);
                 resolve(data);
             } catch (parseError) {
                 console.error(`[EpicBridge] JSON Parse Error for "${target}":`, parseError.message);
-                // اطبع أول جزء من الـ stdout عشان تعرف لو البايثون طبع Error بدل الـ JSON
-                console.log(`[EpicBridge] Raw output:`, stdout.substring(0, 200)); 
+                console.log(`[EpicBridge] Raw output:`, cleanStdout.substring(0, 200)); 
                 resolve(null);
             }
         });

@@ -554,4 +554,4 @@ if __name__ == "__main__":
     
     if result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        print(f"\n⏱️ Time Taken: {end_time - start_time:.2f} seconds")
+        print(f"\n⏱️ Time Taken: {end_time - start_time:.2f} seconds", file=sys.stderr)

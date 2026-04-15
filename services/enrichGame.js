@@ -239,7 +239,7 @@ async function _lookupOnly(item) {
         tasks.push(resolveAndFetch(platform, externalId, gameTitle));
     } 
     else if (platform === 'epic') {
-        tasks.push(fetchEpicDataFromPython(externalId || gameTitle)); 
+        tasks.push(fetchEpicDataFromPython(gameTitle || externalId));
     }
 
     const settled = await Promise.allSettled(tasks);
