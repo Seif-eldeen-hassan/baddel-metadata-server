@@ -343,14 +343,57 @@ async function _saveRawUrls(resolved) {
         ]);
     }
     
-    // ── Epic Python Metadata ──
+    // ─── Epic Python Metadata ──
     if (epicPythonData && platform === 'epic') {
-        await Promise.all([
+        // 1. تحويل الـ Features لـ Tags عشان الـ DB تقراها صح
+        epicPythonData.tags = epicPythonData.features || [];
+
+        // 2. تظبيط الفيديوهات (لأنها بترجع من البايثون كـ Array of Strings مش Objects)
+        const mappedTrailers = (epicPythonData.trailers || []).map(t => {
+            const videoUrl = typeof t === 'string' ? t : t?.video;
+            const thumbUrl = typeof t === 'string' ? null : t?.thumbnail;
+            return { url: videoUrl, thumb: thumbUrl, title: 'Epic Trailer' };
+        });
+
+        // 3. تحضير متطلبات التشغيل (System Requirements) للشكل اللي بتقبله الداتا بيز
+        const epicSysreqs = [];
+        if (epicPythonData.requirements?.systems) {
+            for (const [osName, tiers] of Object.entries(epicPythonData.requirements.systems)) {
+                // توحيد اسم النظام (Windows -> win)
+                const platformMap = { 'Windows': 'win', 'Mac': 'mac', 'Linux': 'linux' };
+                const dbPlatform = platformMap[osName] || osName.toLowerCase();
+
+                for (const [tierName, reqs] of Object.entries(tiers)) {
+                    if (!reqs) continue;
+                    epicSysreqs.push({
+                        platform: dbPlatform,
+                        tier: tierName === 'minimum' ? 'min' : 'rec', // min or rec
+                        os_versions: reqs.OS || null,
+                        cpu: reqs.Processor || null,
+                        gpu: reqs.Graphics || null,
+                        ram: reqs.Memory || null,
+                        storage: reqs.Storage || null,
+                        directx: reqs.DirectX || null,
+                        notes: reqs.Other || null
+                    });
+                }
+            }
+        }
+
+        // 4. تنفيذ كل عمليات الإدخال للداتا بيز
+        const epicPromises = [
             upsertMetadata(gameId, epicPythonData, 'epic'),
-            epicPythonData.avg_rating > 0 ? upsertRating(gameId, { score: epicPythonData.avg_rating * 10, source: 'epic' }) : Promise.resolve(), // ضربنا في 10 عشان يبقى من 100
-            upsertVideos(gameId, epicPythonData.trailers?.map(t => ({ url: t.video, thumb: t.thumbnail, title: 'Epic Trailer' })) || []),
+            epicPythonData.avg_rating > 0 ? upsertRating(gameId, { score: epicPythonData.avg_rating * 10, source: 'epic' }) : Promise.resolve(),
+            upsertVideos(gameId, mappedTrailers),
             updateGameMeta(gameId, { releaseYear: epicPythonData.release_year }),
-        ]);
+        ];
+
+        // إضافة متطلبات التشغيل لو موجودة
+        if (epicSysreqs.length > 0) {
+            epicPromises.push(upsertSysreq(gameId, epicSysreqs, 'epic'));
+        }
+
+        await Promise.all(epicPromises);
     }
 
     await _applyClientFallbacks(gameId, platform, igdbData, epicMeta);
