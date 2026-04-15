@@ -96,26 +96,51 @@ function buildNameCandidates(rawTitle) {
  * Scoring: exact match > starts with > contains > partial
  * Penalizes large length differences.
  */
+/**
+ * Pick the best matching game from SGDB search results.
+ * Scoring: exact match > starts with > contains > partial
+ * Enforces a minimum confidence threshold and strict episode matching.
+ */
 function pickBestSgdbCandidate(results = [], requestedName = '') {
     const target = normalizeTitle(requestedName);
-    if (!target || !results.length) return results[0] ?? null;
+    if (!target || !results.length) return null;
 
     let best      = null;
     let bestScore = -Infinity;
 
+    // دالة مساعدة لاستخراج رقم الحلقة أو الموسم عشان نقارن بيهم
+    const getEpNumber = (str) => {
+        const match = String(str).match(/\b(?:ep|episode|season)\s*(\d+)\b/i);
+        return match ? match[1] : null;
+    };
+    
+    const targetEp = getEpNumber(requestedName);
+
     for (const item of results) {
-        const title = normalizeTitle(item?.name || item?.types?.[0] || '');
+        const rawTitle = item?.name || item?.types?.[0] || '';
+        const title = normalizeTitle(rawTitle);
         if (!title) continue;
 
         let score = 0;
+        
+        // تقييم التطابق
         if (title === target)              score += 100;
         else if (title.startsWith(target)) score += 60;
-        else if (target.startsWith(title)) score += 25;
+        else if (target.startsWith(title)) score += 40; // رفعنا دي شوية عشان الـ Prefixes
         else if (title.includes(target))   score += 40;
         else if (target.includes(title))   score += 15;
 
-        // Penalize length difference
-        score -= Math.min(30, Math.abs(title.length - target.length));
+        // عقاب على فرق الطول (عشان ميمسكش في اسم طويل جداً فيه كلمة من السيرش)
+        score -= Math.min(50, Math.abs(title.length - target.length) * 1.5);
+
+        // Strict Episode Check: لو السيرش فيه رقم حلقة، والنتيجة فيها رقم حلقة مختلف، دمر السكور!
+        const candidateEp = getEpNumber(rawTitle);
+        if (targetEp && candidateEp && targetEp !== candidateEp) {
+            score -= 100; 
+        } else if (!targetEp && candidateEp) {
+            // لو بندور على اللعبة الأساسية ورجعلي حلقة معينة
+            score -= 30;
+        }
 
         if (score > bestScore) {
             bestScore = score;
@@ -123,7 +148,13 @@ function pickBestSgdbCandidate(results = [], requestedName = '') {
         }
     }
 
-    return best ?? results[0] ?? null;
+    // Threshold Check: لو أعلى سكور جاب نتيجة ضعيفة، ارفضها عشان الباك إند يعتمد على Epic Fallback
+    if (bestScore < 25) {
+        console.warn(`[SGDB] Rejected best candidate "${best?.name}" for "${requestedName}" (Low Confidence Score: ${bestScore})`);
+        return null; 
+    }
+
+    return best;
 }
 
 // ─── 1. Resolve SteamGridDB game ID ──────────────────────────────────────────

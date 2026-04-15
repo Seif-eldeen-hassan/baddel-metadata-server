@@ -282,9 +282,10 @@ async function _saveRawUrls(resolved) {
         await upsertImage(gameId, heroSource_, 'hero', heroSource,
                           heroMeta.width, heroMeta.height, 0);
     } else if (!existingHero) {
-        // Epic fallback hero
+        // Epic fallback hero - Use WIDE image types for Hero banners
         const epicHeroUrl = epicMeta?._heroUrl
-            || _pickEpicImageType(epicMeta?.keyImages, ['DieselGameBox', 'OfferImageWide']);
+            || _pickEpicImageType(epicMeta?.keyImages, ['OfferImageWide', 'DieselStoreFrontWide', 'CodeRedemption_340x440', 'DieselGameBox']);
+        
         if (epicHeroUrl) {
             await upsertImage(gameId, 'epic', 'hero', epicHeroUrl, null, null, 0);
         }
