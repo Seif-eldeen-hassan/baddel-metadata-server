@@ -26,6 +26,7 @@ const db                                 = require('../db');
 const { resolveAndFetch }                = require('./igdbResolver');
 const { resolveSgdbImages }              = require('./steamGridDbResolver');
 const { uploadImageToR2, buildCoverKey } = require('./r2');
+const { fetchEpicDataFromPython } = require('./epicPythonBridge');
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -56,20 +57,28 @@ async function upsertImage(gameId, source, imageType, sourceUrl, width, height, 
     );
 }
 
-async function upsertMetadata(gameId, data) {
+async function upsertMetadata(gameId, data, source = 'igdb') {
     await db.query(
         `INSERT INTO game_metadata
-             (game_id, source, description, genres, tags, developer, publisher)
-         VALUES ($1,'igdb',$2,$3,$4,$5,$6)
+             (game_id, source, description, short_description, genres, tags, developer, publisher)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (game_id, source) DO UPDATE SET
-             description = EXCLUDED.description,
-             genres      = EXCLUDED.genres,
-             tags        = EXCLUDED.tags,
-             developer   = EXCLUDED.developer,
-             publisher   = EXCLUDED.publisher,
-             fetched_at  = now()`,
-        [gameId, data.description || null, data.genres || [], data.tags || [],
-         data.developer || null, data.publisher || null]
+             description       = EXCLUDED.description,
+             short_description = EXCLUDED.short_description,
+             genres            = EXCLUDED.genres,
+             tags              = EXCLUDED.tags,
+             developer         = EXCLUDED.developer,
+             publisher         = EXCLUDED.publisher,
+             fetched_at        = now()`,
+        [
+            gameId, source, 
+            data.description || null, 
+            data.short_description || null, 
+            data.genres || [], 
+            data.tags || [],
+            data.developer ? (Array.isArray(data.developer) ? data.developer[0] : data.developer) : null, 
+            data.publisher ? (Array.isArray(data.publisher) ? data.publisher[0] : data.publisher) : null
+        ]
     );
 }
 
@@ -217,37 +226,57 @@ async function _lookupOnly(item) {
         console.warn(`[Lookup] DB read failed for ${gameId}:`, err.message);
     }
 
-    // IGDB and SteamGridDB run in parallel — both are pure HTTP GET
-    const [igdbSettled, sgdbSettled] = await Promise.allSettled([
-        resolveAndFetch(platform, externalId, gameTitle),
-        resolveSgdbImages({
-            steamAppId:    platform === 'steam' ? externalId : undefined,
-            epicNamespace: platform === 'epic'  ? externalId : undefined,
-            igdbId:        undefined,
-            title:         gameTitle || undefined,
-        }),
-    ]);
+    // تجهيز الـ Promises
+    const tasks = [];
+    
+    tasks.push(resolveSgdbImages({
+        steamAppId:    platform === 'steam' ? externalId : undefined,
+        epicNamespace: platform === 'epic'  ? externalId : undefined,
+        title:         gameTitle || undefined,
+    }));
 
-    const igdbResult = igdbSettled.status === 'fulfilled' ? igdbSettled.value  : null;
-    const igdbData   = igdbResult?.data  ?? null;
-    const igdbId     = igdbResult?.igdbId ?? null;
-    const sgdbData   = sgdbSettled.status === 'fulfilled'
-        ? sgdbSettled.value
-        : { cover: null, hero: null, logo: null };
+    if (platform === 'steam') {
+        tasks.push(resolveAndFetch(platform, externalId, gameTitle));
+    } 
+    else if (platform === 'epic') {
+        tasks.push(fetchEpicDataFromPython(externalId || gameTitle)); 
+    }
 
-    if (igdbSettled.status === 'rejected') console.warn(`[Lookup] IGDB failed ${externalId}:`, igdbSettled.reason?.message);
-    if (sgdbSettled.status === 'rejected') console.warn(`[Lookup] SGDB failed ${externalId}:`, sgdbSettled.reason?.message);
+    const settled = await Promise.allSettled(tasks);
+
+    const sgdbSettled = settled[0];
+    const sgdbData = sgdbSettled.status === 'fulfilled' ? sgdbSettled.value : { cover: null, hero: null, logo: null };
+
+    let igdbData = null;
+    let epicPythonData = null;
+
+    if (platform === 'steam' && settled[1]?.status === 'fulfilled') {
+        igdbData = settled[1].value?.data ?? null;
+    } else if (platform === 'epic' && settled[1]?.status === 'fulfilled') {
+        epicPythonData = settled[1].value ?? null;
+    }
+
+    let coverSource = null, heroSource = null, logoSource = null;
+
+    if (platform === 'epic' && epicPythonData) {
+        coverSource = epicPythonData.cover || sgdbData.cover?.url || null;
+        logoSource  = epicPythonData.logo  || sgdbData.logo?.url  || null;
+        
+        heroSource  = sgdbData.hero?.url || epicPythonData.hero || null;
+    } else {
+        coverSource = sgdbData.cover?.url || igdbData?.images?.cover?.url || null;
+        heroSource  = sgdbData.hero?.url || igdbData?.images?.artworks?.[0]?.url || null;
+        logoSource  = sgdbData.logo?.url || igdbData?.images?.logo?.url || null;
+    }
 
     return {
         gameId, platform, externalId, clientData,
-        igdbData, igdbId, sgdbData,
-        // pick raw source URLs — no upload here
-        coverSource:  existingCover ? null : (sgdbData.cover?.url || igdbData?.images?.cover?.url || null),
-        heroSource:   sgdbData.hero?.url || igdbData?.images?.artworks?.[0]?.url || null,
-        logoSource:   sgdbData.logo?.url || igdbData?.images?.logo?.url           || null,
-        coverMeta:    sgdbData.cover || igdbData?.images?.cover         || {},
-        heroMeta:     sgdbData.hero  || igdbData?.images?.artworks?.[0] || {},
-        screenshots:  igdbData?.images?.screenshots || [],
+        igdbData, epicPythonData, sgdbData,
+        coverSource: existingCover ? null : coverSource,
+        heroSource,
+        logoSource,
+        coverMeta: {}, heroMeta: {},
+        screenshots: epicPythonData ? epicPythonData.screenshots : (igdbData?.images?.screenshots || []),
         existingCover,
         existingHero,
     };
@@ -261,7 +290,7 @@ async function _lookupOnly(item) {
 async function _saveRawUrls(resolved) {
     const {
         gameId, platform, externalId, clientData,
-        igdbData, igdbId, sgdbData,
+        igdbData, epicPythonData, igdbId, sgdbData,
         coverSource, heroSource, logoSource,
         coverMeta, heroMeta, screenshots,
         existingCover, existingHero,
@@ -271,21 +300,18 @@ async function _saveRawUrls(resolved) {
 
     // ── Cover ──
     if (coverSource) {
-        const coverSource_ = sgdbData.cover?.url ? 'steamgriddb' : 'igdb';
-        await upsertImage(gameId, coverSource_, 'cover', coverSource,
-                          coverMeta.width, coverMeta.height, 0);
+        const coverSource_ = sgdbData.cover?.url ? 'steamgriddb' : (epicPythonData ? 'epic' : 'igdb');
+        await upsertImage(gameId, coverSource_, 'cover', coverSource, coverMeta.width, coverMeta.height, 0);
     }
 
     // ── Hero ──
     if (heroSource) {
-        const heroSource_ = sgdbData.hero?.url ? 'steamgriddb' : 'igdb';
-        await upsertImage(gameId, heroSource_, 'hero', heroSource,
-                          heroMeta.width, heroMeta.height, 0);
+        const heroSource_ = sgdbData.hero?.url ? 'steamgriddb' : (epicPythonData ? 'epic' : 'igdb');
+        await upsertImage(gameId, heroSource_, 'hero', heroSource, heroMeta.width, heroMeta.height, 0);
     } else if (!existingHero) {
-        // Epic fallback hero - Use WIDE image types for Hero banners
+        // Epic fallback hero
         const epicHeroUrl = epicMeta?._heroUrl
-            || _pickEpicImageType(epicMeta?.keyImages, ['OfferImageWide', 'DieselStoreFrontWide', 'CodeRedemption_340x440', 'DieselGameBox']);
-        
+            || _pickEpicImageType(epicMeta?.keyImages, ['DieselGameBox', 'OfferImageWide']);
         if (epicHeroUrl) {
             await upsertImage(gameId, 'epic', 'hero', epicHeroUrl, null, null, 0);
         }
@@ -293,23 +319,37 @@ async function _saveRawUrls(resolved) {
 
     // ── Logo ──
     if (logoSource) {
-        const logoSource_ = sgdbData.logo?.url ? 'steamgriddb' : 'igdb';
+        const logoSource_ = sgdbData.logo?.url ? 'steamgriddb' : (epicPythonData ? 'epic' : 'igdb');
         await upsertImage(gameId, logoSource_, 'logo', logoSource, null, null, 0);
     }
 
     // ── Screenshots ──
+    // سكربت بايثون بيرجع Strings لكن IGDB بيرجع Objects، فبنوحد الشكل
     for (let i = 0; i < screenshots.length; i++) {
         const ss = screenshots[i];
-        await upsertImage(gameId, 'igdb', 'screenshot', ss.url, ss.width, ss.height, i);
+        const url = typeof ss === 'string' ? ss : ss.url;
+        const w = typeof ss === 'string' ? null : ss.width;
+        const h = typeof ss === 'string' ? null : ss.height;
+        await upsertImage(gameId, platform === 'epic' ? 'epic' : 'igdb', 'screenshot', url, w, h, i);
     }
 
-    // ── IGDB metadata, ratings, videos — no memory cost ──
-    if (igdbData) {
+    // ── IGDB Metadata ──
+    if (igdbData && platform !== 'epic') { // لو ستيم بس بنستخدم IGDB
         await Promise.all([
-            upsertMetadata(gameId, igdbData),
+            upsertMetadata(gameId, igdbData, 'igdb'),
             upsertRating(gameId, igdbData.rating),
             upsertVideos(gameId, igdbData.videos || []),
             updateGameMeta(gameId, igdbData),
+        ]);
+    }
+    
+    // ── Epic Python Metadata ──
+    if (epicPythonData && platform === 'epic') {
+        await Promise.all([
+            upsertMetadata(gameId, epicPythonData, 'epic'),
+            epicPythonData.avg_rating > 0 ? upsertRating(gameId, { score: epicPythonData.avg_rating * 10, source: 'epic' }) : Promise.resolve(), // ضربنا في 10 عشان يبقى من 100
+            upsertVideos(gameId, epicPythonData.trailers?.map(t => ({ url: t.video, thumb: t.thumbnail, title: 'Epic Trailer' })) || []),
+            updateGameMeta(gameId, { releaseYear: epicPythonData.release_year }),
         ]);
     }
 
@@ -320,26 +360,19 @@ async function _saveRawUrls(resolved) {
         await upsertSysreq(gameId, clientData.sysreq, 'steam');
     }
 
-    // Report what raw URLs we have — cdn_url will be null until cron runs
+    // Report
     const cover = coverSource || existingCover?.url || null;
     const hero  = heroSource  || existingHero?.url  || null;
 
     console.log(
         `[Save] ✅ ${externalId}` +
-        ` cover=${cover    ? '✅' : '❌'}` +
-        ` hero=${hero      ? '✅' : '❌'}` +
+        ` cover=${cover ? '✅' : '❌'}` +
+        ` hero=${hero ? '✅' : '❌'}` +
         ` logo=${logoSource ? '✅' : '❌'}` +
-        ` igdb=${igdbData  ? '✅' : '❌'}` +
-        ` [cdn_url=pending cron]`
+        ` Meta=${igdbData || epicPythonData ? '✅' : '❌'}`
     );
 
-    return {
-        gameId, externalId, igdbId,
-        cover,  // raw url — client uses cdn_url || url fallback
-        hero,
-        logo: logoSource || null,
-        hasMetadata: !!igdbData,
-    };
+    return { gameId, externalId, cover, hero, logo: logoSource || null, hasMetadata: !!(igdbData || epicPythonData) };
 }
 
 // ─── Bounded pipeline (main export used by server._drainQueue) ────────────────
