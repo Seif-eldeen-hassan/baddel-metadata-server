@@ -1,8 +1,12 @@
 [phases.setup]
-nixPkgs = ["...", "python3", "python3Packages.pip"]
+nixPkgs = ["nodejs_18", "python3", "python3Packages.pip", "gcc", "python3-dev"]
 
 [phases.install]
-cmds = ["npm install --legacy-peer-deps", "pip3 install -r requirements.txt"]
+cmds = [
+    "npm install --legacy-peer-deps", 
+    "python3 -m pip install --upgrade pip",
+    "pip3 install -r requirements.txt"
+]
 
 [start]
 cmd = "npm start"
