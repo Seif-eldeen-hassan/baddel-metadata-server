@@ -336,13 +336,26 @@ async function _saveRawUrls(resolved) {
 
     // ── IGDB Fallback Metadata ──
     // Save from IGDB only if the store Python script returned no data
-    if (igdbData && !epicPythonData && !steamPythonData) { 
-        await Promise.all([
-            upsertMetadata(gameId, igdbData, 'igdb'),
-            upsertVideos(gameId, igdbData.videos || []),
-            updateGameMeta(gameId, igdbData),
-        ]);
-    }
+    // ─── IGDB Fallback Metadata ──
+    // هنختبر الداتا اللي جاية من ستيم أو إيبك، هل هي مفيدة؟
+    const isRichData = (data) => {
+        if (!data) return false;
+        const hasDev = !!data.developer;
+        const hasGoodDesc = data.description && data.description.length > 20;
+        return hasDev || hasGoodDesc;
+    };
+
+    const hasGoodStoreData = (platform === 'epic' && isRichData(epicPythonData)) || 
+                             (platform === 'steam' && isRichData(steamPythonData));
+
+    // نحفظ بيانات IGDB لو الاستور مرجعش داتا محترمة
+    if (igdbData && !hasGoodStoreData) { 
+        await Promise.all([
+            upsertMetadata(gameId, igdbData, 'igdb'),
+            upsertVideos(gameId, igdbData.videos || []),
+            updateGameMeta(gameId, igdbData),
+        ]);
+    }
     
     if (igdbData && Array.isArray(igdbData.ratings)) {
         for (const ratingObj of igdbData.ratings) {
