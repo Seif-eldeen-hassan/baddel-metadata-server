@@ -369,14 +369,13 @@ async function _saveRawUrls(resolved) {
                     storeSysreqs.push({
                         platform: dbPlatform,
                         tier: tierName, 
-                        os_versions: reqs.OS || null,
-                        cpu: reqs.Processor || null,
-                        gpu: reqs.Graphics || null,
-                        ram: reqs.Memory || null,
-                        storage: reqs.Storage || null,
-                        // Handling different casing from Steam vs Epic
-                        directx: reqs.DirectX || reqs['Direct X'] || null, 
-                        notes: reqs.Other || null
+                        os_versions: reqs.os_versions || null,
+                        cpu: reqs.cpu || null,
+                        gpu: reqs.gpu || null,
+                        ram: reqs.ram || null,
+                        storage: reqs.storage || null,
+                        directx: reqs.directx || null, 
+                        notes: reqs.notes || null
                     });
                 }
             }
