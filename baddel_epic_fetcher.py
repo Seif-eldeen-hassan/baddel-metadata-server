@@ -429,6 +429,22 @@ def extract_requirements(store_details: dict) -> dict:
                 reqs = r
                 break
 
+    # قاموس لتوحيد الأسماء عشان تناسب الداتابيز بتاعتك
+    KEY_MAP = {
+        "os version": "os_versions",
+        "os": "os_versions",
+        "cpu": "cpu",
+        "processor": "cpu",
+        "memory": "ram",
+        "ram": "ram",
+        "gpu": "gpu",
+        "graphics": "gpu",
+        "storage": "storage",
+        "hard drive": "storage",
+        "directx": "directx",
+        "additional notes": "notes"
+    }
+
     systems: dict[str, dict] = {}
     for system in reqs.get("systems", []):
         sys_type    = system.get("systemType", "Unknown")
@@ -436,8 +452,13 @@ def extract_requirements(store_details: dict) -> dict:
         recommended: dict = {}
         for detail in system.get("details", []):
             if title := detail.get("title"):
-                minimum[title]     = detail.get("minimum", "")
-                recommended[title] = detail.get("recommended", "")
+                # توحيد المفتاح لـ lowercase ومقارنته بالقاموس
+                clean_title = title.lower().strip()
+                # لو الاسم موجود في القاموس هنجيب النسخة الموحدة، لو لأ هنحطه زي ما هو بس سمول
+                std_key = KEY_MAP.get(clean_title, clean_title) 
+                
+                minimum[std_key]     = detail.get("minimum", "")
+                recommended[std_key] = detail.get("recommended", "")
         systems[sys_type] = {"minimum": minimum, "recommended": recommended}
 
     return {"languages": reqs.get("languages", []), "systems": systems}
