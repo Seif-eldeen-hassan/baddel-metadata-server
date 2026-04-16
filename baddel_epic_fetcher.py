@@ -45,14 +45,63 @@ def get_slugs(item: dict) -> list[str]:
     return result
 
 def pick_best_page(pages: list) -> dict:
-    best = {}
-    best_len = -1
-    for p in pages:
-        data_str = json.dumps(p)
-        if len(data_str) > best_len:
-            best = p
-            best_len = len(data_str)
-    return best
+    valid_pages = [p for p in pages if p.get("data")]
+    if not valid_pages: return {}
+
+    # Priority 1: Specifically target the base game "home" page
+    for p in valid_pages:
+        if p.get("type") == "productHome" or p.get("_slug") == "home":
+            return p
+
+    # Priority 2: Fallback to the shortest slug to avoid ultimate/deluxe editions
+    valid_pages.sort(key=lambda p: len(p.get("_slug", p.get("pageName", "x"*100))))
+    return valid_pages[0]
+
+
+def get_thumbnail_mapping(page_node: dict) -> dict:
+    """بتربط كل فيديو بالصورة الحقيقية بتاعته بدل الصورة السودة"""
+    mapping = {}
+    
+    def _walk(node, current_image=""):
+        if isinstance(node, dict):
+            # بنمسك الـ Cover Image لو موجودة جنب الفيديو
+            img = node.get("image", {}).get("src")
+            if img: 
+                current_image = img
+            
+            if "recipes" in node:
+                recipes_str = node["recipes"]
+                if isinstance(recipes_str, str) and "{" in recipes_str:
+                    try:
+                        data = json.loads(recipes_str)
+                        for formats in data.values():
+                            if not isinstance(formats, list): continue
+                            for fmt in formats:
+                                if not isinstance(fmt, dict): continue
+                                ref_id = fmt.get("mediaRefId")
+                                if ref_id:
+                                    # الأولية 1: الصورة النظيفة من جوا الـ outputs
+                                    thumb = next((o["url"] for o in fmt.get("outputs", []) if o.get("key") == "thumbnail" and o.get("url")), "")
+                                    # الأولية 2: نستخدم الـ Cover Image اللي مسكناه
+                                    if not thumb: thumb = current_image
+                                    
+                                    if thumb: mapping[ref_id] = thumb
+                    except json.JSONDecodeError:
+                        pass
+                        
+            elif "mediaRefId" in node and isinstance(node["mediaRefId"], str):
+                if current_image:
+                    mapping[node["mediaRefId"]] = current_image
+                    
+            for v in node.values(): 
+                _walk(v, current_image)
+                
+        elif isinstance(node, list):
+            for item in node: 
+                _walk(item, current_image)
+                
+    _walk(page_node)
+    return mapping
 
 # ===========================================================
 # 2. Epic Games API Fetchers
@@ -173,25 +222,21 @@ def fetch_catalog_offer(scraper: cloudscraper.CloudScraper, namespace: str, cata
 # ===========================================================
 # 3. Data Extraction (Primary Path)
 # ===========================================================
-def extract_metadata(store_details: dict, game_data: dict) -> dict:
-    page_data = pick_best_page(store_details.get("pages", [])).get("data", {})
+def extract_metadata(page_node: dict, game_data: dict, offer: dict = None) -> dict:
+    page_data = page_node.get("data", {})
     meta = page_data.get("meta", {})
     about = page_data.get("about", {})
+    offer = offer or {}
 
-    # release year
+    short_desc = about.get("shortDescription") or game_data.get("description", "")
+    if short_desc.strip().lower() == game_data.get("title", "").strip().lower():
+        short_desc = ""
+
     release_year = ""
-    raw_date = (meta.get("releaseDate") or 
-                game_data.get("releaseDate") or 
-                game_data.get("effectiveDate") or "")
-                
-    if raw_date and raw_date.startswith("2099"):
-        raw_date = ""
-        
-    if raw_date:
-        try:
-            release_year = str(datetime.fromisoformat(raw_date.replace("Z", "+00:00")).year)
-        except Exception:
-            release_year = raw_date[:4]
+    raw_date = (meta.get("releaseDate") or game_data.get("releaseDate") or game_data.get("effectiveDate") or "")
+    if raw_date and not raw_date.startswith("2099"):
+        try: release_year = str(datetime.fromisoformat(raw_date.replace("Z", "+00:00")).year)
+        except Exception: release_year = raw_date[:4]
 
     developer, publisher = meta.get("developer") or [], meta.get("publisher") or []
     if not developer and about.get("developerAttribution"): developer = [about["developerAttribution"]]
@@ -203,18 +248,28 @@ def extract_metadata(store_details: dict, game_data: dict) -> dict:
             if not developer and "developer" in key: developer = [v.strip() for v in val.split(",")]
             if not publisher and "publisher" in key: publisher = [v.strip() for v in val.split(",")]
 
+    # 🛠️ استخراج الـ Tags بشكل صارم
     genres, features = [], []
     FEATURE_TAGS = {"CLOUD_SAVES", "CONTROLLER", "SINGLE_PLAYER", "MULTI_PLAYER", "CO_OP", "CROSS_PLATFORM", "ACHIEVEMENTS", "LEADERBOARDS"}
-    for tag in (meta.get("tags") or []):
-        tag_upper = tag.upper().replace(" ", "_")
-        if tag_upper in FEATURE_TAGS: features.append(tag.replace("_", " ").title())
-        else: genres.append(tag.replace("_", " ").title())
+    
+    tags_source = offer.get("tags") or game_data.get("tags") or []
+    
+    for tag in tags_source:
+        name = tag.get("name", "")
+        group = (tag.get("groupName") or "").lower()
         
-    for tag in (game_data.get("tags") or []):
-        name, group_name = tag.get("name", ""), tag.get("groupName", "").upper()
-        if not name: continue
-        if group_name in ("FEATURE", "FEATURES") and name not in features: features.append(name)
-        elif group_name in ("GENRE", "GENRES", "TAG", "TAGS", "") and name not in genres: genres.append(name)
+        # تجاهل الـ IDs أو الداتا الفاضية
+        if not name or name.isdigit():
+            continue
+            
+        # إضافة الـ Genres الرسمية فقط
+        if "genre" in group: 
+            genres.append(name.title())
+            
+        # إضافة الـ Features الرسمية أو اللي موجودة في القائمة بتاعتنا حتى لو من غير جروب
+        elif "feature" in group or name.upper().replace(" ", "_") in FEATURE_TAGS: 
+            features.append(name.title())
+            
 
     return {
         "release_year": release_year,
@@ -224,7 +279,9 @@ def extract_metadata(store_details: dict, game_data: dict) -> dict:
         "genres": list(dict.fromkeys(genres)),
         "features": list(dict.fromkeys(features)),
         "description": about.get("description", "") or game_data.get("description", ""),
+        "short_description": short_desc,
     }
+
 
 def extract_requirements(store_details: dict) -> dict:
     pages = store_details.get("pages", [])
@@ -312,9 +369,10 @@ def _walk_recipes(node, ref_ids: list):
     elif isinstance(node, list):
         for item in node: _walk_recipes(item, ref_ids)
 
-def extract_all_ref_ids(store_details: dict) -> list[str]:
+def extract_page_ref_ids(page_node: dict) -> list[str]:
+    # We rename this and ONLY pass the selected page, not the whole store_details
     ref_ids = []
-    for page in store_details.get("pages", []): _walk_recipes(page, ref_ids)
+    _walk_recipes(page_node, ref_ids)
     return ref_ids
 
 def fetch_video_url(scraper: cloudscraper.CloudScraper, ref_id: str) -> dict | None:
@@ -334,12 +392,23 @@ def fetch_video_url(scraper: cloudscraper.CloudScraper, ref_id: str) -> dict | N
         pass
     return None
 
-def fetch_all_trailers(scraper, ref_ids: list[str]) -> list[dict]:
+def fetch_all_trailers(scraper, ref_ids: list[str], thumb_map: dict = None) -> list[dict]:
+    thumb_map = thumb_map or {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_to_ref = {executor.submit(fetch_video_url, scraper, rid): rid for rid in ref_ids}
         results = {}
         for future in concurrent.futures.as_completed(future_to_ref):
-            if vid_dict := future.result(): results[future_to_ref[future]] = vid_dict
+            rid = future_to_ref[future]
+            if vid_dict := future.result():
+                current_thumb = vid_dict.get("thumbnail", "")
+                good_thumb = thumb_map.get(rid)
+                
+                # 🛠️ لو الصورة سودة (فيها -00001-) أو مش موجودة، حط الصورة النظيفة
+                if good_thumb and (not current_thumb or "-00001-" in current_thumb):
+                    vid_dict["thumbnail"] = good_thumb
+                    
+                results[rid] = vid_dict
+                
     return [results[rid] for rid in ref_ids if rid in results]
 
 # ===========================================================
@@ -457,11 +526,29 @@ def get_baddel_data(game_title: str) -> dict | None:
         if details := fetch_store_details(api, item):
             game_data, store_details = item, details
             break
+    
+    # ===========================================================
+    # 🛠️ DEBUGGING: Save RAW JSON to a file for inspection
+    # ===========================================================
+    if game_data and store_details:
+        debug_dump = {
+            "search_result_game_data": game_data,
+            "store_details_pages": store_details.get("pages", [])
+        }
+        with open("debug_epic_raw.json", "w", encoding="utf-8") as f:
+            json.dump(debug_dump, f, indent=2, ensure_ascii=False)
+        print("🛠️ [DEBUG] تم حفظ الداتا الخام في ملف 'debug_epic_raw.json'. افتحه عشان تشوف المشكلة فين.", file=sys.stderr)
+    # ===========================================================
 
     # ── PRIMARY PATH ──
     if store_details:
         page_node = pick_best_page(store_details["pages"])
         namespace = game_data.get("namespace", "")
+        catalog_id = game_data.get("id", "") # 👈 هنجيب الـ ID بتاع اللعبة
+        
+        # 👈 هنكلم الـ GraphQL هنا عشان نجيب الداتا الكاملة للـ Tags
+        offer_data = fetch_catalog_offer(scraper, namespace, catalog_id) if namespace and catalog_id else {}
+        
         real_rating = fetch_epic_rating(scraper, namespace) if namespace else 0
         avg_rating = real_rating if real_rating > 0 else game_data.get("averageRating", 0)
         
@@ -473,18 +560,23 @@ def get_baddel_data(game_title: str) -> dict | None:
         exclude_set = {u for u in [logo_url, poster_url, background_url] if u}
         screenshots = collect_screenshots(page_node, game_data, exclude_set)
 
-        meta = extract_metadata(store_details, game_data)
+        # 👈 هنباصي الـ offer_data هنا
+        meta = extract_metadata(page_node, game_data, offer_data) 
+        
         requirements = extract_requirements(store_details)
         ratings = extract_ratings(store_details)
 
         direct_trailers = re.findall(r'https?://[^\s"\'\{\}\[\]]+\.mp4', json.dumps(page_node))
         trailers = list(dict.fromkeys(direct_trailers))
+        
         if not trailers:
-            trailers = fetch_all_trailers(scraper, extract_all_ref_ids(store_details))
+            ref_ids = extract_page_ref_ids(page_node)
+            thumb_map = get_thumbnail_mapping(page_node) 
+            trailers = fetch_all_trailers(scraper, ref_ids, thumb_map)
 
         return {
             "title": game_data.get("title"),
-            "short_description": game_data.get("description", ""),
+            "short_description": meta.get("short_description", ""),
             "description": meta["description"],
             "avg_rating": avg_rating,
             "release_year": meta["release_year"],
