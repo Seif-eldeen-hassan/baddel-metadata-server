@@ -339,10 +339,14 @@ async function _saveRawUrls(resolved) {
     if (igdbData && !epicPythonData && !steamPythonData) { 
         await Promise.all([
             upsertMetadata(gameId, igdbData, 'igdb'),
-            upsertRating(gameId, igdbData.rating),
             upsertVideos(gameId, igdbData.videos || []),
             updateGameMeta(gameId, igdbData),
         ]);
+    }
+    
+    // دايماً احفظ تقييم IGDB لو متاح (عشان الجدول ميبقاش فاضي لو المتجر مفيهوش تقييم)
+    if (igdbData && igdbData.rating) {
+        await upsertRating(gameId, igdbData.rating);
     }
     
     // ─── Store Python Metadata (Epic OR Steam) ───
@@ -381,13 +385,19 @@ async function _saveRawUrls(resolved) {
             }
         }
 
+        // توحيد التقييم بين ستيم (rating.score) وإيبك (avg_rating)
+        const ratingScore = platform === 'steam' ? storeData.rating?.score : storeData.avg_rating;
+        const ratingMax = platform === 'steam' ? (storeData.rating?.max_score || 100) : 5;
+        const ratingSource = platform === 'steam' ? (storeData.rating?.source || 'Metacritic') : 'epic';
+
         const storePromises = [
             upsertMetadata(gameId, storeData, platform),
             
-            storeData.rating?.score > 0 ? upsertRating(gameId, { 
-                score: storeData.rating.score, 
-                max_score: storeData.rating.max_score || 5, 
-                source: storeData.rating.source || platform 
+            // لو في تقييم أكبر من صفر، احفظه
+            ratingScore > 0 ? upsertRating(gameId, { 
+                score: ratingScore, 
+                max_score: ratingMax, 
+                source: ratingSource 
             }) : Promise.resolve(),
             
             upsertVideos(gameId, mappedTrailers),
