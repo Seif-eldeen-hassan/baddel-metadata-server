@@ -376,6 +376,27 @@ async function fetchIgdbGameData(igdbId) {
         title: v.name || 'Trailer',
     }));
 
+    // تجهيز مصفوفة التقييمات
+    const ratings = [];
+
+    // 1. إضافة تقييم النقاد لو موجود
+    if (g.aggregated_rating) {
+        ratings.push({
+            score: Number((g.aggregated_rating / 10).toFixed(1)), // تحويل من 100 لـ 10
+            count: g.aggregated_rating_count || 0,
+            source: 'igdb_critics' // تمييز تقييم النقاد
+        });
+    }
+
+    // 2. إضافة تقييم اللاعبين لو موجود
+    if (g.rating) {
+        ratings.push({
+            score: Number((g.rating / 10).toFixed(1)), // تحويل من 100 لـ 10
+            count: g.rating_count || 0,
+            source: 'igdb_users' // تمييز تقييم اللاعبين
+        });
+    }
+
     return {
         igdbId,
         title:       g.name      || null,
@@ -387,15 +408,12 @@ async function fetchIgdbGameData(igdbId) {
         tags,
         developer:   developers[0] || null,
         publisher:   publishers[0] || null,
-        rating: g.aggregated_rating
-            ? { score: g.aggregated_rating, count: g.aggregated_rating_count, source: 'igdb' }
-            : g.rating
-            ? { score: g.rating,            count: g.rating_count,            source: 'igdb_users' }
-            : null,
+        ratings, // 👈 غيرنا اسمها من rating لـ ratings وبقت بترجع Array
         images: { cover, logo, artworks, screenshots },
         videos,
     };
 }
+
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 

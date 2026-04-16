@@ -86,8 +86,7 @@ async function upsertMetadata(gameId, data, source = 'igdb') {
 async function upsertRating(gameId, rating) {
     if (!rating?.score) return;
     
-    // لو مفيش max_score مبعوت (زي IGDB)، هنعتبره 100
-    const maxScore = rating.max_score || 100;
+    const maxScore = rating.max_score || 10;
 
     await db.query(
         `INSERT INTO game_ratings
@@ -101,6 +100,7 @@ async function upsertRating(gameId, rating) {
         [gameId, rating.source, Math.round(rating.score * 10) / 10, maxScore, rating.count || null]
     );
 }
+
 async function upsertVideos(gameId, videos) {
     for (let i = 0; i < videos.length; i++) {
         const v = videos[i];
@@ -344,9 +344,10 @@ async function _saveRawUrls(resolved) {
         ]);
     }
     
-    // دايماً احفظ تقييم IGDB لو متاح (عشان الجدول ميبقاش فاضي لو المتجر مفيهوش تقييم)
-    if (igdbData && igdbData.rating) {
-        await upsertRating(gameId, igdbData.rating);
+    if (igdbData && Array.isArray(igdbData.ratings)) {
+        for (const ratingObj of igdbData.ratings) {
+            await upsertRating(gameId, ratingObj);
+        }
     }
     
     // ─── Store Python Metadata (Epic OR Steam) ───
