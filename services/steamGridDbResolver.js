@@ -18,18 +18,32 @@ const SGDB_BASE = 'https://www.steamgriddb.com/api/v2';
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
 async function sgdbFetch(path) {
-    const res = await fetch(`${SGDB_BASE}${path}`, {
-        headers: {
-            Authorization: `Bearer ${process.env.STEAMGRIDDB_API_KEY}`,
-            Accept:        'application/json',
-        },
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 ثواني وتفصل
 
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`SteamGridDB ${path} → HTTP ${res.status}`);
+    try {
+        const res = await fetch(`${SGDB_BASE}${path}`, {
+            headers: {
+                Authorization: `Bearer ${process.env.STEAMGRIDDB_API_KEY}`,
+                Accept:        'application/json',
+            },
+            signal: controller.signal // 👈 ضيف السيجنال هنا
+        });
+        clearTimeout(timeoutId); // لو ردت بسرعة، الغي التايمر
 
-    const json = await res.json();
-    return json?.success ? json : null;
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error(`SteamGridDB ${path} → HTTP ${res.status}`);
+
+        const json = await res.json();
+        return json?.success ? json : null;
+    } catch (err) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+            console.warn(`[SGDB] Timeout error for ${path}`);
+            return null; // تجاهل اللعبة وكمل عشان خط الإنتاج ميقفش
+        }
+        throw err;
+    }
 }
 
 // ─── Name utils ───────────────────────────────────────────────────────────────

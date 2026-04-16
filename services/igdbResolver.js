@@ -85,20 +85,36 @@ async function igdbFetch(endpoint, body) {
     await _acquireSlot(); // wait for rate-limit slot
 
     const token = await getAccessToken();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 ثواني وتفصل لو مفيش رد
 
-    const res = await fetch(`https://api.igdb.com/v4/${endpoint}`, {
-        method:  'POST',
-        headers: {
-            'Client-ID':     process.env.IGDB_CLIENT_ID,
-            'Authorization': `Bearer ${token}`,
-            'Accept':        'application/json',
-            'Content-Type':  'text/plain',
-        },
-        body,
-    });
+    try {
+        const res = await fetch(`https://api.igdb.com/v4/${endpoint}`, {
+            method:  'POST',
+            headers: {
+                'Client-ID':     process.env.IGDB_CLIENT_ID,
+                'Authorization': `Bearer ${token}`,
+                'Accept':        'application/json',
+                'Content-Type':  'text/plain',
+            },
+            body,
+            signal: controller.signal // 👈 ربطنا الـ Timeout بالـ Fetch هنا
+        });
 
-    if (!res.ok) throw new Error(`IGDB ${endpoint} error: ${res.status}`);
-    return res.json();
+        clearTimeout(timeoutId); // لو ردت بسرعة، نلغي التايمر
+
+        if (!res.ok) throw new Error(`IGDB ${endpoint} error: ${res.status}`);
+        return await res.json();
+    } catch (err) {
+        clearTimeout(timeoutId);
+        
+        if (err.name === 'AbortError') {
+            console.warn(`[IGDB] Timeout error for ${endpoint}`);
+            return null; // نرجع null عشان السيرفر يتجاهل اللعبة دي ويكمل شغل في الباقي
+        }
+        
+        throw err;
+    }
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
