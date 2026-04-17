@@ -261,19 +261,32 @@ async function _lookupOnly(item) {
     logoSource = sgdbData.logo?.url || steamPythonData?.logo || epicPythonData?.logo || igdbData?.images?.logo?.url || null;
 
     if (platform === 'steam' && steamPythonData) {
-        coverSource = steamPythonData.poster || sgdbData.cover?.url || null;
-        heroSource  = steamPythonData.background || sgdbData.hero?.url || null;
-        screenshots = steamPythonData.screenshots || [];
+        // 1. معالجة مشكلة الكوفر (إزالة _2x عشان نتجنب الـ 404)
+        let steamCover = steamPythonData.poster;
+        if (steamCover && steamCover.includes('_2x.jpg')) {
+            steamCover = steamCover.replace('_2x.jpg', '.jpg');
+        }
+
+        // 2. معالجة الهيرو (استبعاد الصورة المزرقة)
+        let steamHero = steamPythonData.background;
+        if (steamHero && steamHero.includes('storepage')) {
+            steamHero = null; // بنصفرها عشان الكود يروح يسحب من البدائل
+        }
+
+        // 3. تحديد المصادر النهائية
+        coverSource = steamCover || sgdbData.cover?.url || igdbData?.images?.cover?.url || null;
+        heroSource  = steamHero  || sgdbData.hero?.url  || igdbData?.images?.artworks?.[0]?.url || null;
+        screenshots = steamPythonData.screenshots || igdbData?.images?.screenshots || [];
     } 
     else if (platform === 'epic' && epicPythonData) {
-        coverSource = epicPythonData.cover || sgdbData.cover?.url || null;
-        heroSource  = sgdbData.hero?.url || epicPythonData.hero || null;
-        screenshots = epicPythonData.screenshots || [];
+        coverSource = epicPythonData.cover || sgdbData.cover?.url || igdbData?.images?.cover?.url || null;
+        heroSource  = epicPythonData.hero  || sgdbData.hero?.url  || igdbData?.images?.artworks?.[0]?.url || null;
+        screenshots = epicPythonData.screenshots || igdbData?.images?.screenshots || [];
     } 
     else {
         // Fallback for IGDB
         coverSource = sgdbData.cover?.url || igdbData?.images?.cover?.url || null;
-        heroSource  = sgdbData.hero?.url || igdbData?.images?.artworks?.[0]?.url || null;
+        heroSource  = sgdbData.hero?.url  || igdbData?.images?.artworks?.[0]?.url || null;
         screenshots = igdbData?.images?.screenshots || [];
     }
 
@@ -286,6 +299,7 @@ async function _lookupOnly(item) {
         screenshots, existingCover, existingHero,
     };
 }
+
 
 // ─── Phase 2: save raw URLs to DB (no Sharp, no R2) ─────────────────────────
 async function _saveRawUrls(resolved) {
