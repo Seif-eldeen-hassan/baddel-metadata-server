@@ -21,6 +21,35 @@
  * promotePendingImages() — nightly cron: Sharp + R2 for all cdn_url IS NULL rows
  */
 
+async function getValidSteamCover(url) {
+    if (!url) return null;
+    try {
+        const check = async (testUrl) => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 1500); // 1.5 ثانية ماكس
+            const res = await fetch(testUrl, { method: 'HEAD', signal: controller.signal });
+            clearTimeout(timeout);
+            return res.ok ? testUrl : null;
+        };
+
+        // 1. نجرب اللينك الأساسي (_2x)
+        let validUrl = await check(url);
+        if (validUrl) return validUrl;
+
+        // 2. لو فشل (404)، نجرب نشيل الـ _2x كفرصة أخيرة
+        if (url.includes('_2x.jpg')) {
+            validUrl = await check(url.replace('_2x.jpg', '.jpg'));
+            if (validUrl) return validUrl;
+        }
+
+        // 3. الاتنين فشلوا (المطور مرفعش صورة أصلاً)
+        return null; 
+    } catch (err) {
+        // لو حصل Timeout أو ستيم واقع، نعتبر الصورة مش موجودة عشان الـ Pipeline متقفش
+        return null; 
+    }
+}
+
 const { EventEmitter }                   = require('events');
 const db                                 = require('../db');
 const { resolveAndFetch }                = require('./igdbResolver');
