@@ -158,16 +158,23 @@ async function upsertSteamRating(gameId, steamRating) {
     if (!steamRating?.score) return;
     await db.query(
         `INSERT INTO game_ratings
-             (game_id, source, score, max_score, positive_count, negative_count, total_reviews)
-         VALUES ($1,'steam',$2,100,$3,$4,$5)
+             (game_id, source, score, max_score, positive_count, negative_count, total_reviews, rating_label)
+         VALUES ($1,'steam',$2,100,$3,$4,$5,$6)
          ON CONFLICT (game_id, source) DO UPDATE SET
              score          = EXCLUDED.score,
              positive_count = EXCLUDED.positive_count,
              negative_count = EXCLUDED.negative_count,
              total_reviews  = EXCLUDED.total_reviews,
+             rating_label   = EXCLUDED.rating_label,
              fetched_at     = now()`,
-        [gameId, steamRating.score, steamRating.positive || null,
-         steamRating.negative || null, steamRating.total || null]
+        [
+            gameId, 
+            steamRating.score, 
+            steamRating.positive || null,
+            steamRating.negative || null, 
+            steamRating.total || null,
+            steamRating.label || null 
+        ]
     );
 }
 
@@ -450,6 +457,7 @@ async function _saveRawUrls(resolved) {
             storePromises.push(upsertSysreq(gameId, storeSysreqs, platform));
         }
 
+        // Steam specific reviews
         if (platform === 'steam' && storeData.steam_reviews?.total_reviews > 0) {
             const positive     = storeData.steam_reviews.positive_reviews;
             const total        = storeData.steam_reviews.total_reviews;
@@ -460,6 +468,7 @@ async function _saveRawUrls(resolved) {
                 positive: positive,
                 negative: storeData.steam_reviews.negative_reviews,
                 total:    total,
+                label:    storeData.steam_reviews.review_score_desc 
             }));
         }
 
