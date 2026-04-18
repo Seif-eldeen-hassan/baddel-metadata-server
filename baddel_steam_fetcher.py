@@ -63,33 +63,40 @@ def get_steam_game_standardized(app_id):
 
         details_res = details_raw.json()
 
-        if str(app_id) not in details_res or not details_res[str(app_id)].get('success'):
-            print(json.dumps({"error": "Invalid AppID or game unavailable"}))
+        # FIX 1: Safely guard against `details_res` evaluating to None
+        if not details_res or str(app_id) not in details_res or not details_res[str(app_id)].get('success'):
+            print(json.dumps({"error": "Invalid AppID, geo-blocked, or game unavailable"}))
             return
 
         data = details_res[str(app_id)]['data']
+        if not data:
+            print(json.dumps({"error": "No data payload inside successful Steam response"}))
+            return
 
         # ── Reviews request ──────────────────────────────────────────────────
         reviews_raw = requests.get(reviews_url, timeout=15)
         reviews_res = reviews_raw.json() if 'application/json' in reviews_raw.headers.get('Content-Type', '') else {}
-        reviews_data = reviews_res.get('query_summary', {})
+        
+        # FIX 2: Guard against reviews_res being None
+        reviews_data = reviews_res.get('query_summary', {}) if reviews_res else {}
 
         # ── Parse fields ─────────────────────────────────────────────────────
-        release_date_str = data.get('release_date', {}).get('date', '')
+        release_date_str = data.get('release_date', {}).get('date', '') if data.get('release_date') else ''
         release_year = release_date_str[-4:] if release_date_str else ""
 
-        platforms_dict = data.get('platforms', {})
+        platforms_dict = data.get('platforms') or {}
         platforms = [plat.capitalize() for plat, supported in platforms_dict.items() if supported]
 
         languages_raw = data.get('supported_languages', '')
         languages_clean = clean_html(languages_raw).replace('*', '')
 
         trailers = []
-        for movie in data.get('movies', []):
+        # FIX 3: Use `or []` to ensure None is converted to an empty array before iteration
+        for movie in (data.get('movies') or []):
             video_url = movie.get('dash_h264', '') or movie.get('mp4', {}).get('max', movie.get('webm', {}).get('max', ''))
             trailers.append({"video": video_url, "thumbnail": movie.get('thumbnail', '')})
 
-        screenshots = [{"url": ss.get('path_full', ''), "width": 1920, "height": 1080} for ss in data.get('screenshots', [])]
+        screenshots = [{"url": ss.get('path_full', ''), "width": 1920, "height": 1080} for ss in (data.get('screenshots') or [])]
 
         systems = {}
         for os_name, os_key in [("Windows", "pc_requirements"), ("macOS", "mac_requirements"), ("Linux", "linux_requirements")]:
@@ -117,11 +124,11 @@ def get_steam_game_standardized(app_id):
                 "source": "Metacritic" if data.get('metacritic') else "No Rating"
             },
             "release_year": release_year,
-            "developer": data.get('developers', []),
-            "publisher": data.get('publishers', []),
+            "developer": data.get('developers') or [],
+            "publisher": data.get('publishers') or [],
             "platform": platforms,
-            "genres": [genre['description'] for genre in data.get('genres', [])],
-            "features": [cat['description'] for cat in data.get('categories', [])],
+            "genres": [genre['description'] for genre in (data.get('genres') or [])],
+            "features": [cat['description'] for cat in (data.get('categories') or [])],
             "requirements": {
                 "languages": [languages_clean],
                 "systems": systems
@@ -142,7 +149,9 @@ def get_steam_game_standardized(app_id):
         print(json.dumps(baddel_format, ensure_ascii=False))
 
     except Exception as e:
-        print(json.dumps({"error": str(e)}))
+        # Returning standard error JSON, but printing traceback inside Python for deeper debugging if it happens again
+        import traceback
+        print(json.dumps({"error": str(e), "trace": traceback.format_exc()}))
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
