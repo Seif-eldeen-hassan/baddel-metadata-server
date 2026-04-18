@@ -15,21 +15,21 @@ def parse_steam_requirements(html_str: str) -> dict:
         "hard drive": "storage",
         "directx": "directx",
         "additional notes": "notes",
-        "sound card": "notes"  
+        "sound card": "notes"
     }
     parsed_reqs = {}
     pattern = r'<strong>(.*?)[:]?<\/strong>\s*(.*?)(?:<br\s*\/?>|<\/li>|$)'
     matches = re.findall(pattern, html_str, re.IGNORECASE)
     for key, value in matches:
         clean_key = key.strip().lower()
-        clean_value = re.sub(r'<[^>]+>', '', value).strip() 
+        clean_value = re.sub(r'<[^>]+>', '', value).strip()
         if clean_key in KEY_MAP:
             db_key = KEY_MAP[clean_key]
             if db_key == 'notes' and 'notes' in parsed_reqs:
                 parsed_reqs[db_key] += " | " + clean_value
             else:
                 parsed_reqs[db_key] = clean_value
-                
+
     return parsed_reqs
 
 def clean_html(raw_html):
@@ -43,7 +43,7 @@ def clean_description(raw_html):
     text = re.sub(r'<(br|/p|/h[1-6]|/div|/li)\s*/?>', '\n', raw_html, flags=re.IGNORECASE)
     cleanr = re.compile('<.*?>')
     text = re.sub(cleanr, '', text)
-    text = re.sub(r'\n\s*\n', '\n\n', text) 
+    text = re.sub(r'\n\s*\n', '\n\n', text)
     return text.replace('\t', '').strip()
 
 def get_steam_game_standardized(app_id):
@@ -51,16 +51,30 @@ def get_steam_game_standardized(app_id):
     reviews_url = f"https://store.steampowered.com/appreviews/{app_id}?json=1&language=all"
 
     try:
-        details_res = requests.get(details_url).json()
-        reviews_res = requests.get(reviews_url).json()
+        # ── Details request ──────────────────────────────────────────────────
+        details_raw = requests.get(details_url, timeout=15)
+
+        content_type = details_raw.headers.get('Content-Type', '')
+        if 'application/json' not in content_type:
+            print(json.dumps({
+                "error": f"Steam returned non-JSON (HTTP {details_raw.status_code}), likely rate limited"
+            }))
+            return
+
+        details_res = details_raw.json()
 
         if str(app_id) not in details_res or not details_res[str(app_id)].get('success'):
             print(json.dumps({"error": "Invalid AppID or game unavailable"}))
             return
 
         data = details_res[str(app_id)]['data']
+
+        # ── Reviews request ──────────────────────────────────────────────────
+        reviews_raw = requests.get(reviews_url, timeout=15)
+        reviews_res = reviews_raw.json() if 'application/json' in reviews_raw.headers.get('Content-Type', '') else {}
         reviews_data = reviews_res.get('query_summary', {})
 
+        # ── Parse fields ─────────────────────────────────────────────────────
         release_date_str = data.get('release_date', {}).get('date', '')
         release_year = release_date_str[-4:] if release_date_str else ""
 
@@ -83,7 +97,6 @@ def get_steam_game_standardized(app_id):
             if reqs and isinstance(reqs, dict) and (reqs.get('minimum') or reqs.get('recommended')):
                 min_html = reqs.get('minimum', '')
                 rec_html = reqs.get('recommended', '')
-                
                 systems[os_name] = {}
                 if min_html: systems[os_name]["minimum"] = parse_steam_requirements(min_html)
                 if rec_html: systems[os_name]["recommended"] = parse_steam_requirements(rec_html)
@@ -125,8 +138,7 @@ def get_steam_game_standardized(app_id):
                 "negative_reviews": reviews_data.get('total_negative', 0)
             }
         }
-        
-        # مهم جداً: طباعة الـ JSON فقط بدون أي نصوص تانية
+
         print(json.dumps(baddel_format, ensure_ascii=False))
 
     except Exception as e:

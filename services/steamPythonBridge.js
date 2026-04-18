@@ -12,15 +12,47 @@ try {
 
 const PYTHON_SCRIPT_PATH = path.join(__dirname, '..', 'baddel_steam_fetcher.py');
 
-/**
- * @param {string} appId
- * @returns {Promise<Object|null>}
- */
+// ─── Concurrency limiter ──────────────────────────────────────────────────────
+// Steam rate-limits aggressively. We cap at 2 concurrent requests
+// and add a 1s delay between each call to avoid getting blocked.
+const MAX_CONCURRENT = 2;
+const DELAY_BETWEEN_MS = 1000;
+
+let activeCount = 0;
+const waitQueue = [];
+
+function _next() {
+    if (waitQueue.length === 0 || activeCount >= MAX_CONCURRENT) return;
+    const { resolve } = waitQueue.shift();
+    resolve();
+}
+
+function _acquireSlot() {
+    return new Promise((resolve) => {
+        if (activeCount < MAX_CONCURRENT) {
+            resolve();
+        } else {
+            waitQueue.push({ resolve });
+        }
+    });
+}
+
+function _releaseSlot() {
+    activeCount--;
+    setTimeout(_next, DELAY_BETWEEN_MS);
+}
+
+// ─── Core fetch ───────────────────────────────────────────────────────────────
 async function fetchSteamDataFromPython(appId) {
     if (!appId) return null;
 
+    await _acquireSlot();
+    activeCount++;
+
     return new Promise((resolve) => {
-        execFile(PYTHON_BIN, [PYTHON_SCRIPT_PATH, appId], { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+        execFile(PYTHON_BIN, [PYTHON_SCRIPT_PATH, String(appId)], { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+            _releaseSlot();
+
             if (error) {
                 console.error(`[SteamBridge] EXIT ERROR for "${appId}":`, error.message);
                 console.error(`[SteamBridge] STDERR:`, stderr);
