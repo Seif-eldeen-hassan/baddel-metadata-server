@@ -15,8 +15,8 @@ const PYTHON_SCRIPT_PATH = path.join(__dirname, '..', 'baddel_steam_fetcher.py')
 // ─── Concurrency limiter ──────────────────────────────────────────────────────
 // Steam rate-limits aggressively. We cap at 2 concurrent requests
 // and add a 1s delay between each call to avoid getting blocked.
-const MAX_CONCURRENT = 2;
-const DELAY_BETWEEN_MS = 1000;
+const MAX_CONCURRENT = 1;
+const DELAY_BETWEEN_MS = 2000;
 
 let activeCount = 0;
 const waitQueue = [];
