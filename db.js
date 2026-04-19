@@ -1,21 +1,36 @@
+'use strict';
 const { Pool } = require('pg');
 require('dotenv').config();
 
-// إعداد الاتصال بقاعدة البيانات
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false // السطر ده مهم جداً عشان Supabase بيطلب اتصال مشفر
+/**
+ * SSL configuration:
+ *
+ * Production (DATABASE_URL set, DB_SSL_REJECT_UNAUTHORIZED not 'false'):
+ *   - Full TLS with certificate verification (rejectUnauthorized: true)
+ *   - This is the correct setting for Supabase and any hosted Postgres
+ *
+ * Local dev override (DB_SSL_REJECT_UNAUTHORIZED=false):
+ *   - Disables cert verification — only for local self-signed certs
+ *   - Never set this in production
+ *
+ * No DATABASE_URL (local dev, no SSL):
+ *   - ssl: false — plain local connection
+ */
+function buildSslConfig() {
+    if (!process.env.DATABASE_URL) return false;          // local plain connection
+    if (process.env.DB_SSL_REJECT_UNAUTHORIZED === 'false') {
+        return { rejectUnauthorized: false };              // explicit dev override only
     }
+    return { rejectUnauthorized: true };                  // secure default for production
+}
+
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL || 'postgresql://localhost/baddel_test',
+    ssl: buildSslConfig(),
 });
 
-// اختبار سريع للاتصال أول ما السيرفر يشتغل
-pool.connect((err, client, release) => {
-    if (err) {
-        return console.error('❌ Error acquiring client', err.stack);
-    }
-    console.log('✅ Successfully connected to Supabase Database!');
-    release(); // تحرير الاتصال بعد النجاح
+pool.on('error', (err) => {
+    console.error('[DB] Unexpected pool error:', err.message);
 });
 
 module.exports = pool;

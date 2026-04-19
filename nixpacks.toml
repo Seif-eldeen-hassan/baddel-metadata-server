@@ -1,12 +1,12 @@
 [phases.setup]
-nixPkgs = ["nodejs_18", "python3", "python3Packages.pip", "gcc"]
+nixPkgs = ["nodejs_22", "python3", "python3Packages.pip", "gcc"]
 
 [phases.install]
 cmds = [
-    "npm install --legacy-peer-deps",
+    "npm ci --legacy-peer-deps",
     "python3 -m venv .venv",
-    ".venv/bin/pip install -r requirements.txt"
+    ".venv/bin/pip install --no-cache-dir -r requirements.txt"
 ]
 
 [start]
-cmd = ". .venv/bin/activate && npm start"
+cmd = ". .venv/bin/activate && node server.js"
