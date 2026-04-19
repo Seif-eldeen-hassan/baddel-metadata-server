@@ -9,6 +9,13 @@
  * Everything else is rejected.
  *
  * Limits are deliberately tight because this is a public, low-trust endpoint.
+ *
+ * Request headers used (optional, never for auth):
+ *   X-Baddel-Install-Id  — used as the primary rate-limit key when present and valid
+ *   X-Baddel-App-Version — logged for telemetry/abuse analysis only
+ *
+ * Neither header is required. An invalid or missing install-id causes the
+ * rate limiter to fall back to keying by IP; it does NOT reject the request.
  */
 
 // Steam app IDs are up to 7 digits. Epic namespace slugs are typically 32 hex chars.

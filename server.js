@@ -21,6 +21,8 @@ const { enqueue, getJob, getJobsByGame }       = require('./services/jobQueue');
 const worker                                   = require('./services/jobWorker');
 const { importAndEnqueueOne }                  = require('./services/importOrQueueService');
 const { validateClientEnrichRequest }          = require('./middleware/validateClientRequest');
+const { validateClientBatchRequest,
+        MAX_BATCH_SIZE }                       = require('./middleware/validateClientBatchRequest');
 
 const app = express();
 
@@ -45,22 +47,190 @@ const corsOptions = {
         cb(new Error('CORS: origin not allowed'));
     },
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Cron-Secret', 'X-Request-ID'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Cron-Secret', 'X-Request-ID', 'X-Baddel-Install-Id', 'X-Baddel-App-Version'],
 };
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 const lookupLimiter = rateLimit({ windowMs: 60000, max: 120, standardHeaders: true, legacyHeaders: false, message: { status: 'error', message: 'Too many requests' } });
 const adminLimiter  = rateLimit({ windowMs: 60000, max: 30,  standardHeaders: true, legacyHeaders: false, message: { status: 'error', message: 'Too many requests' } });
 
-// Stricter limiter for the public client endpoint — harder to spam
-// 10 requests per minute per IP, burst window of 5 minutes allows 20
-const clientEnrichLimiter = rateLimit({
-    windowMs: 60 * 1000,  // 1 minute window
-    max: 10,              // 10 requests per IP per minute
+// ─── Client enrich rate limiter ───────────────────────────────────────────────
+//
+// Design rationale:
+//   A legitimate launcher sync of ~100 Epic or Steam games arrives in one pass.
+//   The launcher now drains an EnrichQueue at concurrency=2 with retry backoff,
+//   so the burst is spread over time — but a cold first-sync can still generate
+//   ~100 distinct requests in a short window.
+//
+//   Old policy:  10 req / 1 min / IP  → collapses for any library > 10 games.
+//   New policy:  two-tier combined key:
+//
+//   Tier A — per install-id (when header present, treat as the primary key):
+//     • 120 requests per 5-minute window  (= 24 req/min average ceiling)
+//     • burst: up to 30 requests in any 60-second sub-window is fine; the
+//       outer 5-min window prevents sustained abuse.
+//     Rationale: a 100-game sync at concurrency-2 spreads over ~2–3 min;
+//     120 / 5 min gives comfortable headroom even with a few retries.
+//
+//   Tier B — per IP fallback (when no install-id header):
+//     • 60 requests per 5-minute window  (stricter — unknown client identity)
+//
+//   Both tiers use standardHeaders:true so the response carries:
+//     RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After
+//   The custom handler also adds a JSON body with retryAfterSeconds so the
+//   launcher can honour it without parsing the header string.
+//
+//   Neither key is authentication — X-Baddel-Install-Id is client-controlled
+//   and logged for abuse analysis only.
+//
+// Abuse resistance preserved:
+//   • A single IP cycling fake install IDs is still bounded per-IP by the
+//     inner per-IP guard (Tier B applied to IPs not matched by install-id).
+//   • Absolute ceiling is much lower than the admin routes (30/min) and the
+//     lookup route (120/min) — admin secrets are still required for bulk ops.
+//   • Unknown / header-absent clients get the tighter 60/5-min limit.
+//
+
+/**
+ * Derive the rate-limit key for a client-enrich request.
+ * Primary key: X-Baddel-Install-Id (validated as non-empty, alphanumeric-ish).
+ * Fallback:    IP address.
+ *
+ * The install-id is NOT trusted as authentication — it is a best-effort signal
+ * used to avoid penalising a legitimate sync because a different client shares
+ * the same NAT IP.
+ *
+ * @param {import('express').Request} req
+ * @returns {string}
+ */
+function clientEnrichKey(req) {
+    const raw = (req.headers['x-baddel-install-id'] || '').trim();
+    // Accept UUIDs and any reasonable identifier: alphanumeric + hyphens, 8–64 chars.
+    // Reject empty, whitespace-only, or suspiciously long values — fall back to IP.
+    if (raw && /^[a-zA-Z0-9\-]{8,64}$/.test(raw)) {
+        return `install:${raw}`;
+    }
+    return `ip:${req.ip}`;
+}
+
+/**
+ * Custom 429 handler for the client enrich endpoint.
+ * Sets Retry-After (already done by standardHeaders:true via express-rate-limit)
+ * and returns a structured JSON body the launcher can act on.
+ */
+function clientEnrichRateLimitHandler(req, res, _next, options) {
+    const installId  = (req.headers['x-baddel-install-id']  || '').trim() || null;
+    const appVersion = (req.headers['x-baddel-app-version'] || '').trim() || null;
+    const platform   = req.body?.platform   || null;
+    const externalId = req.body?.id         || null;
+
+    // Compute seconds until window resets from the header already set by the limiter
+    const retryAfterRaw = res.getHeader('Retry-After');
+    const retryAfterSeconds = retryAfterRaw ? Number(retryAfterRaw) : null;
+
+    log.warn({
+        reqId:       req.id,
+        event:       'rate_limited',
+        key:         clientEnrichKey(req),
+        ip:          req.ip,
+        installId,
+        appVersion,
+        platform,
+        externalId,
+        retryAfterSeconds,
+    }, '[Client] request-enrich rate limited');
+
+    return res.status(options.statusCode ?? 429).json({
+        status:            'error',
+        message:           'Too many requests — slow down and retry',
+        retryAfterSeconds: retryAfterSeconds,
+    });
+}
+
+// Tier A: keyed by install-id (primary) — 120 req / 5 min
+const clientEnrichLimiterByInstall = rateLimit({
+    windowMs:        5 * 60 * 1000,   // 5-minute window
+    limit:           120,              // 120 requests per install-id per 5 min
+    keyGenerator:    clientEnrichKey,
     standardHeaders: true,
-    legacyHeaders: false,
-    message: { status: 'error', message: 'Too many requests — please wait before retrying' },
+    legacyHeaders:   false,
+    handler:         clientEnrichRateLimitHandler,
 });
+
+// Tier B: always-on per-IP guard — 60 req / 5 min
+// Runs after Tier A; catches IP-level abuse regardless of install-id header.
+const clientEnrichLimiterByIp = rateLimit({
+    windowMs:        5 * 60 * 1000,   // 5-minute window
+    limit:           60,              // 60 requests per IP per 5 min
+    keyGenerator:    (req) => `ip:${req.ip}`,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler:         clientEnrichRateLimitHandler,
+});
+
+// Compose both tiers into a single middleware array used on the route.
+// Express applies them left-to-right; if Tier A fires 429 the request stops there.
+const clientEnrichLimiter = [clientEnrichLimiterByInstall, clientEnrichLimiterByIp];
+
+// ─── Client BATCH enrich rate limiters ────────────────────────────────────────
+//
+// Batch requests are counted per HTTP request, NOT per game.
+// A launcher sending 4 × 100-game batches to cover a 400-game library should
+// not be penalised as if it sent 400 individual requests.
+//
+// Tier A: per install-id — 20 batch requests / 5 min
+//   Rationale: a full 400-game cold sync needs at most ceil(400/200) = 2 batch
+//   calls. 20 / 5-min gives 10× headroom for retries, restarts, and partial
+//   re-syncs while still capping a misconfigured or abusive client.
+//
+// Tier B: per IP — 10 batch requests / 5 min (tighter, unknown identity)
+//
+// Both handlers reuse the same 429 JSON shape as the single-game limiter so
+// the launcher only needs one retry strategy.
+//
+
+function clientBatchRateLimitHandler(req, res, _next, options) {
+    const installId         = (req.headers['x-baddel-install-id']  || '').trim() || null;
+    const appVersion        = (req.headers['x-baddel-app-version'] || '').trim() || null;
+    const retryAfterRaw     = res.getHeader('Retry-After');
+    const retryAfterSeconds = retryAfterRaw ? Number(retryAfterRaw) : null;
+
+    log.warn({
+        reqId: req.id,
+        event: 'rate_limited_batch',
+        key:   clientEnrichKey(req),
+        ip:    req.ip,
+        installId,
+        appVersion,
+        retryAfterSeconds,
+    }, '[Client] request-enrich/batch rate limited');
+
+    return res.status(options.statusCode ?? 429).json({
+        status:            'error',
+        message:           'Too many batch requests — slow down and retry',
+        retryAfterSeconds: retryAfterSeconds,
+    });
+}
+
+const clientBatchLimiterByInstall = rateLimit({
+    windowMs:        5 * 60 * 1000,
+    limit:           20,
+    keyGenerator:    clientEnrichKey,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler:         clientBatchRateLimitHandler,
+});
+
+const clientBatchLimiterByIp = rateLimit({
+    windowMs:        5 * 60 * 1000,
+    limit:           10,
+    keyGenerator:    (req) => `ip:${req.ip}`,
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler:         clientBatchRateLimitHandler,
+});
+
+const clientBatchLimiter = [clientBatchLimiterByInstall, clientBatchLimiterByIp];
 
 app.use(cors(corsOptions));
 app.use(requestId);
@@ -150,7 +320,7 @@ app.get('/games/enrich-stream', requireAuth, async (req, res) => {
 // X-Baddel-Install-Id and X-Baddel-App-Version are logged for telemetry/abuse
 // analysis but are NOT used for authentication — they are client-controlled.
 //
-app.post('/client/request-enrich', clientEnrichLimiter, validateClientEnrichRequest, async (req, res, next) => {
+app.post('/client/request-enrich', ...clientEnrichLimiter, validateClientEnrichRequest, async (req, res, next) => {
     const { platform, id, title } = req.body;
 
     // Telemetry headers — low-trust signals only, never used for auth
@@ -196,7 +366,121 @@ app.post('/client/request-enrich', clientEnrichLimiter, validateClientEnrichRequ
     }
 });
 
-// ─── Game Lookup ───────────────────────────────────────────────────────────────
+// ─── Client: batch request enrichment (public, low-trust, abuse-resistant) ────
+//
+// Recommended path for launchers syncing large libraries (> ~10 games).
+// Accepts up to MAX_BATCH_SIZE games per request; the launcher should page its
+// library into chunks and send them sequentially (no need for concurrency —
+// the server fans out internally).
+//
+// Does NOT require API_SECRET. Does NOT expose admin, cron, or bulk-enrich ops.
+// Rate limited per batch request (not per game) — a 400-game cold sync needs
+// only 2 HTTP calls, both well inside the 20/5-min window.
+//
+// Idempotent: sending the same batch twice is safe. Each game is independently
+// checked for existing records and active jobs before any insert.
+//
+app.post('/client/request-enrich/batch', ...clientBatchLimiter, validateClientBatchRequest, async (req, res, next) => {
+    const { platform, validGames, invalidResults, dedupCount } = req.validatedBatch;
+    const installId  = (req.headers['x-baddel-install-id']  || '').trim() || null;
+    const appVersion = (req.headers['x-baddel-app-version'] || '').trim() || null;
+
+    log.info({
+        reqId:      req.id,
+        platform,
+        installId,
+        appVersion,
+        ip:         req.ip,
+        batchSize:  validGames.length + invalidResults.length + dedupCount,
+        validCount: validGames.length,
+        invalidCount: invalidResults.length,
+        dedupCount,
+    }, '[Client] request-enrich/batch received');
+
+    // Process all valid games concurrently. allSettled so one failure never
+    // aborts the rest — the result per game is surfaced individually.
+    const settled = await Promise.allSettled(
+        validGames.map(({ id, title }) =>
+            importAndEnqueueOne({ platform, externalId: id, hintTitle: title || null })
+                .then(result => ({ id, ...result }))
+        )
+    );
+
+    const results = [];
+    let queuedCount       = 0;
+    let alreadyQueuedCount = 0;
+    let alreadyExistsCount = 0;
+    let errorCount        = 0;
+
+    for (let i = 0; i < settled.length; i++) {
+        const s  = settled[i];
+        const id = validGames[i].id;
+
+        if (s.status === 'fulfilled') {
+            const r = s.value;
+            if (r.reason === 'already_exists')  alreadyExistsCount++;
+            else if (r.reason === 'already_queued') alreadyQueuedCount++;
+            else queuedCount++;
+
+            results.push({
+                id,
+                gameId:        r.gameId,
+                jobId:         r.jobId ?? null,
+                status:        r.reason,       // already_exists | already_queued | needs_enrich | created_and_queued
+                queued:        r.queued,
+                alreadyQueued: r.alreadyQueued,
+            });
+        } else {
+            // Log the error but do not expose internals to the client
+            log.error({
+                reqId:    req.id,
+                platform,
+                externalId: id,
+                err:      s.reason?.message,
+                stack:    s.reason?.stack,
+            }, '[Client] request-enrich/batch item failed');
+
+            errorCount++;
+            results.push({ id, status: 'error', queued: false, alreadyQueued: false });
+        }
+    }
+
+    // Merge invalid items that were caught by validation
+    for (const inv of invalidResults) {
+        results.push({ id: inv.id ?? null, index: inv.index, status: 'invalid', reason: inv.reason, queued: false, alreadyQueued: false });
+    }
+
+    const acceptedCount = queuedCount + alreadyQueuedCount + alreadyExistsCount;
+
+    log.info({
+        reqId:             req.id,
+        platform,
+        installId,
+        ip:                req.ip,
+        acceptedCount,
+        queuedCount,
+        alreadyQueuedCount,
+        alreadyExistsCount,
+        invalidCount:      invalidResults.length,
+        errorCount,
+        dedupCount,
+    }, '[Client] request-enrich/batch complete');
+
+    // 207 Multi-Status: reflects that individual items may have different outcomes
+    return res.status(207).json({
+        status:            'multi',
+        platform,
+        acceptedCount,
+        queuedCount,
+        alreadyQueuedCount,
+        alreadyExistsCount,
+        invalidCount:      invalidResults.length,
+        errorCount,
+        dedupCount,
+        maxBatchSize:      MAX_BATCH_SIZE,
+        results,
+    });
+});
 app.get('/games/lookup', lookupLimiter, validateLookup, async (req, res, next) => {
     const { uuid, platform, namespace, id, slug, title } = req.query;
     try {

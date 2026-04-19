@@ -64,6 +64,7 @@ async function importAndEnqueueOne({ platform, externalId, hintTitle = null }) {
         }
 
         if (enriched) {
+            log.info({ gameId, platform, externalId }, '[ImportOrQueue] already_exists — no work needed');
             return { gameId, jobId: null, queued: false, alreadyQueued: false, reason: 'already_exists' };
         }
 
@@ -85,6 +86,7 @@ async function importAndEnqueueOne({ platform, externalId, hintTitle = null }) {
 
         if (activeJobs.rows.length > 0) {
             const jobId = activeJobs.rows[0].id;
+            log.info({ gameId, jobId, platform, externalId }, '[ImportOrQueue] already_queued — active job exists');
             return { gameId, jobId, queued: false, alreadyQueued: true, reason: 'already_queued' };
         }
 

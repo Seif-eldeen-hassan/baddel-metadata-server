@@ -47,7 +47,8 @@ Client / Baddel Electron App
         ├─ GET  /health                        [public]
         ├─ GET  /health/ready                  [public — 503 during drain]
         ├─ GET  /games/lookup                  [public, rate-limited]
-        ├─ POST /client/request-enrich         [public, low-trust, abuse-limited]
+        ├─ POST /client/request-enrich         [public, low-trust, abuse-limited, single-game]
+        ├─ POST /client/request-enrich/batch   [public, low-trust, abuse-limited, ≤200 games ← USE THIS FOR LARGE SYNCS]
         ├─ POST /games/import                  [requireAuth — admin only]
         ├─ POST /games/enrich                  [requireAuth] → enrich_jobs table
         ├─ POST /games/enrich/:gameId          [requireAuth] → enrich_jobs table
@@ -69,6 +70,131 @@ Client / Baddel Electron App
   PostgreSQL (Supabase)        Cloudflare R2
   enrich_jobs table            baddel-media bucket
 ```
+
+---
+
+---
+
+## Client Endpoint: POST /client/request-enrich/batch  ← **Recommended for large syncs**
+
+Use this endpoint when syncing more than ~10 games. The launcher should chunk its library into pages of up to 200 games and send them one-at-a-time (no concurrency needed — the server fans out internally).
+
+### Why batch instead of single-game requests?
+
+| Scenario | Single-game `/client/request-enrich` | Batch `/client/request-enrich/batch` |
+|---|---|---|
+| 400-game cold sync | 400 HTTP requests, each counted against the rate limiter | 2 HTTP requests (200 + 200), each counted as 1 against the batch limiter |
+| Rate-limit headroom | 120 req / 5 min → sync takes ≥ 17 minutes worst-case | 20 batch req / 5 min → sync takes seconds |
+| Retry complexity | Launcher must track and retry each game individually | Launcher retries one request; server returns per-item status |
+| Response clarity | 400 separate responses to merge | One structured summary with per-game outcome |
+
+### Request
+
+```http
+POST /client/request-enrich/batch
+Content-Type: application/json
+X-Baddel-Install-Id: <launcher-install-uuid>   (optional, for telemetry & rate-limit keying)
+X-Baddel-App-Version: 1.2.3                    (optional, for telemetry)
+```
+
+```json
+{
+  "platform": "steam",
+  "games": [
+    { "id": "570",    "title": "Dota 2"       },
+    { "id": "730",    "title": "CS2"          },
+    { "id": "440"                             }
+  ]
+}
+```
+
+**Allowed top-level fields:** `platform`, `games` — anything else → 400.  
+**Allowed per-game fields:** `id`, `title` (optional) — anything else → that game is marked `invalid` in results.
+
+| Field | Rules |
+|---|---|
+| `platform` | Required. Must be exactly `"steam"` or `"epic"` |
+| `games` | Required. Array of 1–200 items |
+| `games[].id` | Required. Alphanumeric + hyphens/underscores only. Max 64 chars |
+| `games[].title` | Optional hint. Max 200 chars. Never stored without server-side resolution |
+
+Hard cap: **200 games per request**. For libraries > 200, split into sequential pages.  
+Duplicates within a single batch (same platform+id) are silently deduplicated — no error.
+
+### Response (HTTP 207 Multi-Status)
+
+```json
+{
+  "status": "multi",
+  "platform": "steam",
+  "acceptedCount": 198,
+  "queuedCount": 150,
+  "alreadyQueuedCount": 10,
+  "alreadyExistsCount": 38,
+  "invalidCount": 1,
+  "errorCount": 0,
+  "dedupCount": 1,
+  "maxBatchSize": 200,
+  "results": [
+    {
+      "id": "570",
+      "gameId": "<uuid>",
+      "jobId": "<job-id>",
+      "status": "created_and_queued",
+      "queued": true,
+      "alreadyQueued": false
+    },
+    {
+      "id": "9999invalid!",
+      "index": 2,
+      "status": "invalid",
+      "reason": "games[2]: id contains invalid characters",
+      "queued": false,
+      "alreadyQueued": false
+    }
+  ]
+}
+```
+
+Per-item `status` values:
+
+| `status` | Meaning |
+|---|---|
+| `created_and_queued` | Game was new — created and queued for enrichment |
+| `needs_enrich` | Game existed but was not enriched — queued now |
+| `already_queued` | Active job already exists — no duplicate created |
+| `already_exists` | Game is already sufficiently enriched — no work needed |
+| `invalid` | Item failed validation — skipped entirely |
+| `error` | Unexpected server error for this item — safe to retry |
+
+### Launcher recommended flow for large libraries
+
+```
+1. Chunk library into pages of 200 games
+2. For each page (sequentially — no concurrency needed):
+   a. POST /client/request-enrich/batch
+   b. Collect any status='error' items for retry
+   c. Wait 500ms between pages to be polite (not required)
+3. Poll GET /games/lookup per game as the app needs data
+   (enrichment completes in background, typically 10–30s per game)
+```
+
+### Batch-specific rate limits
+
+| Tier | Key | Limit |
+|---|---|---|
+| A (primary) | `X-Baddel-Install-Id` (when valid UUID-like, 8–64 chars) | **20 batch requests per 5-minute window** |
+| B (always-on) | IP address | **10 batch requests per 5-minute window** |
+
+A 400-game library needs 2 batch requests (200 + 200). The 20/5-min limit gives 10× headroom for retries, restarts, and re-syncs. Tier B prevents a single IP from cycling fake install IDs to bypass Tier A.
+
+429 responses include `Retry-After` header (seconds) and a JSON body with `retryAfterSeconds`.
+
+### What the batch endpoint does NOT expose
+
+- Admin routes (`/games/enrich`, `/games/import`, `/games/enrich-all`)
+- Cron operations (`/jobs/promote-images`)
+- Any privilege escalation — per-game idempotency and enrichment safety are identical to the single-game endpoint
 
 ---
 
@@ -129,9 +255,26 @@ Allowed fields: `platform`, `id`, `title` (optional). Any other field is rejecte
 
 ### Abuse protection
 
-- **10 requests per IP per minute** (much stricter than admin routes)
+Two-tier rate limit — both tiers must pass:
+
+| Tier | Key | Limit |
+|---|---|---|
+| A (primary) | `X-Baddel-Install-Id` when header is present and valid (UUID-like, 8–64 alphanum chars) | **120 requests per 5-minute window** |
+| B (always-on) | IP address | **60 requests per 5-minute window** |
+
+Rationale: a legitimate 100-game library sync at concurrency-2 takes 2–3 minutes and generates ≤ 100 distinct requests. Tier A gives 120/5 min = 24 req/min average headroom. Tier B prevents a single IP from bypassing the install-id limit by cycling fake identifiers.
+
+If the install-id header is absent or invalid, Tier A falls back to IP as well — effectively 60/5 min for unknown clients.
+
+Every 429 response includes:
+- Standard `RateLimit-*` and `Retry-After` headers (seconds)
+- JSON body with `retryAfterSeconds` for launcher consumption
+
+Every rate-limit hit is logged with: `event`, `key`, `ip`, `installId`, `platform`, `externalId`, `retryAfterSeconds`.
+
+Other protections unchanged:
 - Strict field allowlist — no URL injection, no metadata blobs, no cover images
-- `X-Baddel-Install-Id` and `X-Baddel-App-Version` are logged for abuse analysis but are not authentication — they are client-controlled signals only
+- `X-Baddel-Install-Id` and `X-Baddel-App-Version` are **not authentication** — client-controlled signals only
 - No privilege escalation — cannot trigger batch enrich, enrich-all, cron, or admin operations
 
 ---
@@ -185,7 +328,7 @@ Events emitted: `enriched`, `error`, `update`
 | CORS | `CORS_ORIGIN` env allowlist, no wildcard |
 | Auth | `Authorization: Bearer API_SECRET` on all mutating routes |
 | Cron auth | `X-Cron-Secret` header — **503** if `CRON_SECRET` not set (fail closed) |
-| Rate limiting | 120/min on lookups, 30/min on admin routes |
+| Rate limiting | 120/min on lookups, 30/min on admin routes; client-enrich: 120/5-min per install-id + 60/5-min per IP; client-enrich/batch: 20/5-min per install-id + 10/5-min per IP (per request, not per game) |
 | Input validation | `middleware/validate.js` — type, length, enum checks |
 | SSRF | HTTPS-only, 14-host allowlist, DNS/private-IP check on every request, manual hop-by-hop redirect validation, raw IP literal rejection, 10MB limit, image content-type check, 15s timeout |
 | R2 keys | `buildImageKey(row)` uses DB UUID + URL hash — zero collision possible |
