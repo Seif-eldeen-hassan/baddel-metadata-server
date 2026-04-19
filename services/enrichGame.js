@@ -71,6 +71,32 @@ async function upsertImage(client, gameId, source, imageType, sourceUrl, width, 
     );
 }
 
+/**
+ * Cover-specific upsert: overwrites stale cover rows so previously saved wrong
+ * Epic covers get corrected on re-enrich. Clears cdn_url so the promote cron
+ * re-uploads the new image to R2.
+ * Assumes game_images has a unique constraint on (game_id, image_type) for covers,
+ * or falls back to (game_id, source, image_type) — adjust the conflict target to
+ * match your actual schema constraint.
+ */
+async function upsertCover(client, gameId, source, sourceUrl, width, height) {
+    if (!sourceUrl) return;
+    await client.query(
+        `INSERT INTO game_images
+             (game_id, source, image_type, url, cdn_url, width, height, sort_order)
+         VALUES ($1,$2,'cover',$3, NULL,$4,$5,0)
+         ON CONFLICT (game_id, image_type)
+         DO UPDATE SET
+             url      = EXCLUDED.url,
+             source   = EXCLUDED.source,
+             cdn_url  = NULL,
+             width    = EXCLUDED.width,
+             height   = EXCLUDED.height,
+             fetched_at = now()`,
+        [gameId, source, sourceUrl, width || null, height || null]
+    );
+}
+
 async function upsertMetadata(client, gameId, data, source = 'igdb') {
     await client.query(
         `INSERT INTO game_metadata
@@ -383,9 +409,25 @@ async function _saveRawUrls(resolved) {
 
         // ── Cover ──
         if (coverSource) {
-            const src = sgdbData.cover?.url ? 'steamgriddb'
-                : (epicPythonData ? 'epic' : (steamPythonData ? 'steam' : 'igdb'));
-            await upsertImage(client, gameId, src, 'cover', coverSource, coverMeta.width, coverMeta.height, 0);
+            // Derive source to match the actual precedence used in _lookupOnly.
+            // Epic:  epicPoster -> sgdbCover -> keyImages fallback -> igdbCover
+            // Steam: steamCover -> sgdbCover -> igdbCover
+            // Other: sgdbCover -> igdbCover
+            let src;
+            if (platform === 'epic') {
+                const epicPoster = epicPythonData?.poster || null;
+                src = coverSource === epicPoster                      ? 'epic'
+                    : coverSource === sgdbData.cover?.url            ? 'steamgriddb'
+                    : epicPythonData                                  ? 'epic'   // keyImages fallback
+                    :                                                   'igdb';
+            } else if (platform === 'steam') {
+                src = coverSource === sgdbData.cover?.url ? 'steamgriddb'
+                    : steamPythonData                     ? 'steam'
+                    :                                       'igdb';
+            } else {
+                src = sgdbData.cover?.url ? 'steamgriddb' : 'igdb';
+            }
+            await upsertCover(client, gameId, src, coverSource, coverMeta.width, coverMeta.height);
         }
 
         // ── Hero ──
