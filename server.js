@@ -6,7 +6,8 @@ validateEnv();
 require('dotenv').config();
 const express   = require('express');
 const cors      = require('cors');
-const rateLimit = require('express-rate-limit');
+const rateLimit        = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 
 const db                                       = require('./db');
 const log                                      = require('./config/logger');
@@ -110,7 +111,7 @@ function clientEnrichKey(req) {
     if (raw && /^[a-zA-Z0-9\-]{8,64}$/.test(raw)) {
         return `install:${raw}`;
     }
-    return `ip:${req.ip}`;
+    return `ip:${ipKeyGenerator(req)}`;
 }
 
 /**
@@ -162,10 +163,7 @@ const clientEnrichLimiterByInstall = rateLimit({
 const clientEnrichLimiterByIp = rateLimit({
     windowMs:        5 * 60 * 1000,   // 5-minute window
     limit:           60,              // 60 requests per IP per 5 min
-    keyGenerator:    (req) => `ip:${req.ip}`,
-    standardHeaders: true,
-    legacyHeaders:   false,
-    handler:         clientEnrichRateLimitHandler,
+    keyGenerator:    (req) => `ip:${ipKeyGenerator(req)}`,
 });
 
 // Compose both tiers into a single middleware array used on the route.
@@ -224,7 +222,7 @@ const clientBatchLimiterByInstall = rateLimit({
 const clientBatchLimiterByIp = rateLimit({
     windowMs:        5 * 60 * 1000,
     limit:           10,
-    keyGenerator:    (req) => `ip:${req.ip}`,
+    keyGenerator:    (req) => `ip:${ipKeyGenerator(req)}`,
     standardHeaders: true,
     legacyHeaders:   false,
     handler:         clientBatchRateLimitHandler,
