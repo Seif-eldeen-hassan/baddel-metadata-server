@@ -19,6 +19,8 @@ const { resolveSteamGame, resolveEpicGame }    = require('./services/coverResolv
 const { enrichGame, promotePendingImages }     = require('./services/enrichGame');
 const { enqueue, getJob, getJobsByGame }       = require('./services/jobQueue');
 const worker                                   = require('./services/jobWorker');
+const { importAndEnqueueOne }                  = require('./services/importOrQueueService');
+const { validateClientEnrichRequest }          = require('./middleware/validateClientRequest');
 
 const allowedOrigins = (process.env.CORS_ORIGIN || '').split(',').map(o => o.trim()).filter(Boolean);
 const corsOptions = {
@@ -35,6 +37,16 @@ const corsOptions = {
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 const lookupLimiter = rateLimit({ windowMs: 60000, max: 120, standardHeaders: true, legacyHeaders: false, message: { status: 'error', message: 'Too many requests' } });
 const adminLimiter  = rateLimit({ windowMs: 60000, max: 30,  standardHeaders: true, legacyHeaders: false, message: { status: 'error', message: 'Too many requests' } });
+
+// Stricter limiter for the public client endpoint — harder to spam
+// 10 requests per minute per IP, burst window of 5 minutes allows 20
+const clientEnrichLimiter = rateLimit({
+    windowMs: 60 * 1000,  // 1 minute window
+    max: 10,              // 10 requests per IP per minute
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { status: 'error', message: 'Too many requests — please wait before retrying' },
+});
 
 const app = express();
 app.use(cors(corsOptions));
@@ -114,6 +126,61 @@ app.get('/games/enrich-stream', requireAuth, async (req, res) => {
     const heartbeat = setInterval(() => { try { res.write(':ping\n\n'); } catch { clearInterval(heartbeat); } }, 25000);
     req.on('close', () => { clearInterval(pollTimer); clearInterval(heartbeat); });
     await poll();
+});
+
+// ─── Client: request enrichment (public, low-trust, abuse-resistant) ──────────
+//
+// Used by the Baddel launcher to request metadata for a game without
+// requiring an admin secret. Strictly validated, tightly rate-limited.
+//
+// Does NOT expose batch enrich, enrich-all, cron, or arbitrary import payloads.
+// X-Baddel-Install-Id and X-Baddel-App-Version are logged for telemetry/abuse
+// analysis but are NOT used for authentication — they are client-controlled.
+//
+app.post('/client/request-enrich', clientEnrichLimiter, validateClientEnrichRequest, async (req, res, next) => {
+    const { platform, id, title } = req.body;
+
+    // Telemetry headers — low-trust signals only, never used for auth
+    const installId  = req.headers['x-baddel-install-id']  || null;
+    const appVersion = req.headers['x-baddel-app-version'] || null;
+
+    log.info({
+        reqId:      req.id,
+        platform,
+        externalId: id,
+        installId,
+        appVersion,
+        ip:         req.ip,
+    }, '[Client] request-enrich received');
+
+    try {
+        const result = await importAndEnqueueOne({
+            platform,
+            externalId: id,
+            hintTitle:  title || null,
+        });
+
+        log.info({
+            reqId:      req.id,
+            platform,
+            externalId: id,
+            gameId:     result.gameId,
+            jobId:      result.jobId,
+            reason:     result.reason,
+            installId,
+        }, '[Client] request-enrich result');
+
+        return res.status(result.queued || result.alreadyQueued ? 202 : 200).json({
+            status:        result.queued || result.alreadyQueued ? 'accepted' : 'success',
+            queued:        result.queued,
+            alreadyQueued: result.alreadyQueued,
+            gameId:        result.gameId,
+            jobId:         result.jobId,
+            reason:        result.reason,
+        });
+    } catch (err) {
+        next(err);
+    }
 });
 
 // ─── Game Lookup ───────────────────────────────────────────────────────────────

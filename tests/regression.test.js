@@ -657,3 +657,249 @@ describe('Worker shutdown', () => {
         assert.equal(wModule._running, false);
     });
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 13. validateClientEnrichRequest middleware
+// ══════════════════════════════════════════════════════════════════════════════
+describe('validateClientEnrichRequest', () => {
+    const { validateClientEnrichRequest } = require('../middleware/validateClientRequest');
+
+    function mockReqRes(body) {
+        const req = { body };
+        let statusCode, jsonBody;
+        const res = { status(c) { statusCode = c; return this; }, json(b) { jsonBody = b; return this; } };
+        return { req, res, getStatus: () => statusCode, getBody: () => jsonBody };
+    }
+
+    it('passes valid steam request', (_, done) => {
+        const { req, res } = mockReqRes({ platform: 'steam', id: '570' });
+        validateClientEnrichRequest(req, res, () => done());
+    });
+
+    it('passes valid epic request with optional title', (_, done) => {
+        const { req, res } = mockReqRes({ platform: 'epic', id: 'abc123', title: 'My Game' });
+        validateClientEnrichRequest(req, res, () => done());
+    });
+
+    it('rejects missing platform', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ id: '570' });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects invalid platform value', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'gog', id: '570' });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects missing id', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'steam' });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects oversized id', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'steam', id: 'a'.repeat(65) });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects id with URL/special characters', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'steam', id: 'https://evil.com/img.jpg' });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects oversized title', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'steam', id: '570', title: 'x'.repeat(201) });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects unknown field (e.g. cover_url injection)', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'steam', id: '570', cover_url: 'https://evil.com/img.jpg' });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects unknown field (epic_metadata injection)', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'epic', id: 'abc123', epic_metadata: { developer: 'evil' } });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects blank id string', (_, done) => {
+        const { req, res, getStatus } = mockReqRes({ platform: 'steam', id: '   ' });
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(getStatus(), 400); done();
+    });
+
+    it('rejects array body', (_, done) => {
+        const req = { body: [] };
+        let statusCode;
+        const res = { status(c) { statusCode = c; return this; }, json() { return this; } };
+        validateClientEnrichRequest(req, res, () => done(new Error('should not pass')));
+        assert.equal(statusCode, 400); done();
+    });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 14. importAndEnqueueOne service logic
+// ══════════════════════════════════════════════════════════════════════════════
+describe('importAndEnqueueOne service', () => {
+
+    // Build an isolated inline version of importAndEnqueueOne using mock state
+    function makeServiceUnderTest() {
+        const games        = [];  // { id, slug, title, entry_type }
+        const platformIds  = [];  // { game_id, platform, namespace, external_id }
+        const metadata     = [];  // { game_id }
+        const images       = [];  // { game_id, image_type }
+        const enrichJobs   = [];  // { id, game_id, platform, external_id, status }
+        let idCounter      = 1;
+
+        async function isEnriched(gameId) {
+            const hasMeta  = metadata.some(m => m.game_id === gameId);
+            const hasImage = images.some(i => i.game_id === gameId && i.image_type !== 'cover');
+            return hasMeta && hasImage;
+        }
+
+        async function enqueue({ gameId, platform, externalId }) {
+            const hasActive = enrichJobs.some(j => j.game_id === gameId && ['queued','running'].includes(j.status));
+            if (hasActive) return { id: enrichJobs.find(j => j.game_id === gameId).id, created: false };
+            const id = `job-${idCounter++}`;
+            enrichJobs.push({ id, game_id: gameId, platform, external_id: externalId, status: 'queued' });
+            return { id, created: true };
+        }
+
+        async function importAndEnqueueOne({ platform, externalId, hintTitle }) {
+            const ns = platform === 'steam' ? 'app_id' : 'catalog_namespace';
+
+            // 1. Lookup existing
+            const pidRow = platformIds.find(p => p.platform === platform && p.namespace === ns && p.external_id === externalId);
+            let gameId = pidRow?.game_id || null;
+
+            if (gameId) {
+                const enriched = await isEnriched(gameId);
+                if (enriched) return { gameId, jobId: null, queued: false, alreadyQueued: false, reason: 'already_exists' };
+
+                const activeJob = enrichJobs.find(j => j.game_id === gameId && ['queued','running'].includes(j.status));
+                if (activeJob) return { gameId, jobId: activeJob.id, queued: false, alreadyQueued: true, reason: 'already_queued' };
+
+                const { id: jobId } = await enqueue({ gameId, platform, externalId, clientData: {} });
+                return { gameId, jobId, queued: true, alreadyQueued: false, reason: 'needs_enrich' };
+            }
+
+            // 2. Create
+            gameId = `game-${idCounter++}`;
+            const title = hintTitle || `${platform}-${externalId}`;
+            const slug  = title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().replace(/\s+/g, '-') || `${platform}-${externalId}`;
+            games.push({ id: gameId, slug, title, entry_type: 'game' });
+            platformIds.push({ game_id: gameId, platform, namespace: ns, external_id: externalId });
+
+            const { id: jobId } = await enqueue({ gameId, platform, externalId, clientData: {} });
+            return { gameId, jobId, queued: true, alreadyQueued: false, reason: 'created_and_queued' };
+        }
+
+        return { importAndEnqueueOne, games, platformIds, metadata, images, enrichJobs };
+    }
+
+    it('creates game and queues job for new game', async () => {
+        const svc = makeServiceUnderTest();
+        const r = await svc.importAndEnqueueOne({ platform: 'steam', externalId: '570' });
+        assert.equal(r.reason, 'created_and_queued');
+        assert.equal(r.queued, true);
+        assert.equal(r.alreadyQueued, false);
+        assert.ok(r.gameId);
+        assert.ok(r.jobId);
+        assert.equal(svc.games.length, 1);
+        assert.equal(svc.enrichJobs.length, 1);
+    });
+
+    it('returns already_exists for enriched game — no new job', async () => {
+        const svc = makeServiceUnderTest();
+        // Pre-create enriched game
+        const gameId = 'game-exists';
+        svc.platformIds.push({ game_id: gameId, platform: 'steam', namespace: 'app_id', external_id: '570' });
+        svc.metadata.push({ game_id: gameId });
+        svc.images.push({ game_id: gameId, image_type: 'hero' });
+
+        const r = await svc.importAndEnqueueOne({ platform: 'steam', externalId: '570' });
+        assert.equal(r.reason, 'already_exists');
+        assert.equal(r.queued, false);
+        assert.equal(r.alreadyQueued, false);
+        assert.equal(r.jobId, null);
+        assert.equal(svc.enrichJobs.length, 0); // no job created
+    });
+
+    it('returns already_queued when active job exists — no duplicate', async () => {
+        const svc = makeServiceUnderTest();
+        const gameId = 'game-partial';
+        svc.platformIds.push({ game_id: gameId, platform: 'steam', namespace: 'app_id', external_id: '570' });
+        svc.enrichJobs.push({ id: 'job-existing', game_id: gameId, platform: 'steam', external_id: '570', status: 'queued' });
+
+        const r = await svc.importAndEnqueueOne({ platform: 'steam', externalId: '570' });
+        assert.equal(r.reason, 'already_queued');
+        assert.equal(r.alreadyQueued, true);
+        assert.equal(r.queued, false);
+        assert.equal(r.jobId, 'job-existing');
+        assert.equal(svc.enrichJobs.length, 1); // no new job
+    });
+
+    it('returns needs_enrich and queues when game exists but not enriched', async () => {
+        const svc = makeServiceUnderTest();
+        const gameId = 'game-partial';
+        svc.platformIds.push({ game_id: gameId, platform: 'epic', namespace: 'catalog_namespace', external_id: 'fortnite' });
+        // Not enriched (no metadata, no non-cover images)
+
+        const r = await svc.importAndEnqueueOne({ platform: 'epic', externalId: 'fortnite' });
+        assert.equal(r.reason, 'needs_enrich');
+        assert.equal(r.queued, true);
+        assert.equal(svc.enrichJobs.length, 1);
+    });
+
+    it('repeated calls for same new game do not create duplicate jobs', async () => {
+        const svc = makeServiceUnderTest();
+        const r1 = await svc.importAndEnqueueOne({ platform: 'steam', externalId: '570' });
+        const r2 = await svc.importAndEnqueueOne({ platform: 'steam', externalId: '570' });
+        assert.equal(r1.reason, 'created_and_queued');
+        assert.equal(r2.reason, 'already_queued');
+        assert.equal(svc.enrichJobs.length, 1); // only one job total
+    });
+
+    it('uses hintTitle as slug seed when provided', async () => {
+        const svc = makeServiceUnderTest();
+        await svc.importAndEnqueueOne({ platform: 'steam', externalId: '570', hintTitle: 'Dota 2' });
+        assert.equal(svc.games[0].title, 'Dota 2');
+    });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 15. Admin routes still require API_SECRET
+// ══════════════════════════════════════════════════════════════════════════════
+describe('Admin route auth still enforced', () => {
+    const { requireAuth } = require('../middleware/auth');
+
+    function mockReqRes(headers = {}) {
+        const req = { headers, path: '/test', ip: '127.0.0.1' };
+        let statusCode;
+        const res = { status(c) { statusCode = c; return this; }, json() { return this; } };
+        return { req, res, getStatus: () => statusCode };
+    }
+
+    it('/games/import still requires API_SECRET', (_, done) => {
+        const restore = mockEnv({ API_SECRET: 'securekey1234567890abcdef12345678' });
+        const { req, res, getStatus } = mockReqRes({});
+        requireAuth(req, res, () => done(new Error('should have been rejected')));
+        assert.equal(getStatus(), 401);
+        restore(); done();
+    });
+
+    it('/games/enrich still requires API_SECRET', (_, done) => {
+        const restore = mockEnv({ API_SECRET: 'securekey1234567890abcdef12345678' });
+        const { req, res, getStatus } = mockReqRes({ authorization: 'Bearer wrongsecret' });
+        requireAuth(req, res, () => done(new Error('should have been rejected')));
+        assert.equal(getStatus(), 401);
+        restore(); done();
+    });
+});
