@@ -1,11 +1,22 @@
--- migrations/002_job_queue.sql
+-- migrations/002_job_queue.sql  (v2 — safe to re-run, fixes original idempotency gap)
 --
 -- Durable enrichment job queue.
--- Run once against production DB before deploying the new server.
--- Idempotent — safe to re-run.
 --
--- Jobs survive restarts and multiple instances won't double-process
--- because of the FOR UPDATE SKIP LOCKED pattern.
+-- HOW TO APPLY:
+--   psql $DATABASE_URL -f migrations/002_job_queue.sql
+--
+-- This script is fully idempotent:
+--   - CREATE TABLE IF NOT EXISTS
+--   - CREATE UNIQUE INDEX IF NOT EXISTS
+--   - CREATE INDEX IF NOT EXISTS
+-- Safe to re-run without side effects.
+--
+-- WHAT THIS FIXES:
+--   The worker fails immediately on startup with:
+--     [Worker] startup stale recovery error
+--     [Worker] claimBatch error
+--   Both fail because enrich_jobs does not exist (PG error 42P01: relation not found).
+--   This migration creates the table and indexes.
 
 BEGIN;
 
@@ -35,6 +46,21 @@ CREATE INDEX IF NOT EXISTS idx_enrich_jobs_queue
     ON enrich_jobs (queued_at ASC)
     WHERE status = 'queued';
 
+-- Verify the table was created / already exists
+DO $$
+DECLARE
+    col_count INTEGER;
+BEGIN
+    SELECT COUNT(*) INTO col_count
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name   = 'enrich_jobs';
+
+    IF col_count < 12 THEN
+        RAISE EXCEPTION 'enrich_jobs created but column count unexpected: %', col_count;
+    END IF;
+
+    RAISE NOTICE 'enrich_jobs OK — % columns present', col_count;
+END $$;
+
 COMMIT;
-
-

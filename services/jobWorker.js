@@ -3,42 +3,28 @@
 /**
  * services/jobWorker.js
  *
- * Polls enrich_jobs for queued work and processes it.
- * Safe to run on multiple instances simultaneously — uses FOR UPDATE SKIP LOCKED.
- *
- * Usage:
- *   const worker = require('./services/jobWorker');
- *   worker.start();   // begins polling loop
- *   await worker.stop(); // drains in-flight, stops cleanly
+ * CHANGES vs original:
+ *  1. All log.error calls now emit errFlat (flat string) as a top-level field
+ *     so Railway's log viewer shows the actual error message in the log line,
+ *     not a collapsed nested object.
+ *  2. checkSchema() is called at startup before the first tick — prints a clear
+ *     PASS/FAIL line so you know immediately if the migration is missing.
+ *  3. On claimBatch error, logs err._pgFlat (set by jobQueue) + err.stack.
  */
 
-const { claimBatch, complete, fail, recoverStaleJobs } = require('./jobQueue');
-const { enrichGame }                 = require('./enrichGame');
-const log                            = require('../config/logger');
+const { claimBatch, complete, fail, recoverStaleJobs, checkSchema, pgErrFlat } = require('./jobQueue');
+const { enrichGame } = require('./enrichGame');
+const log            = require('../config/logger');
 
-const POLL_INTERVAL_MS      = 2000;
-const ACTIVE_INTERVAL       = 100;
-const STALE_RECOVERY_MS     = 5 * 60 * 1000; // run stale recovery every 5 minutes
+const POLL_INTERVAL_MS  = 2000;
+const ACTIVE_INTERVAL   = 100;
+const STALE_RECOVERY_MS = 5 * 60 * 1000;
 
-let _running      = false;
-let _stopping     = false;
-let _timer        = null;
-let _staleTimer   = null;
-let _inFlight     = 0;
-
-// ─── Error serialiser — includes stack + PostgreSQL error code ────────────────
-
-function serializeError(err) {
-    return {
-        message: err?.message,
-        stack:   err?.stack,
-        // PostgreSQL driver surfaces these on query errors
-        code:    err?.code,       // e.g. '42P01' (undefined_table), '23505' (unique_violation)
-        detail:  err?.detail,
-        hint:    err?.hint,
-        where:   err?.where,
-    };
-}
+let _running    = false;
+let _stopping   = false;
+let _timer      = null;
+let _staleTimer = null;
+let _inFlight   = 0;
 
 // ─── Main poll loop ───────────────────────────────────────────────────────────
 
@@ -49,7 +35,11 @@ async function _tick() {
     try {
         jobs = await claimBatch();
     } catch (err) {
-        log.error({ err: serializeError(err) }, '[Worker] claimBatch error');
+        // errFlat is a top-level string field — Railway renders it in the log line
+        log.error(
+            { errFlat: err._pgFlat || pgErrFlat(err), stack: err?.stack },
+            '[Worker] claimBatch error'
+        );
         _scheduleNext(POLL_INTERVAL_MS);
         return;
     }
@@ -59,12 +49,10 @@ async function _tick() {
         return;
     }
 
-    // Process claimed jobs concurrently (they're already claimed/locked)
     _inFlight += jobs.length;
     await Promise.allSettled(jobs.map(_processJob));
     _inFlight -= jobs.length;
 
-    // If we got a full batch, poll again immediately — more may be waiting
     _scheduleNext(jobs.length > 0 ? ACTIVE_INTERVAL : POLL_INTERVAL_MS);
 }
 
@@ -79,9 +67,12 @@ async function _processJob(job) {
         await complete(jobId);
         log.info({ jobId, gameId }, '[Worker] job complete');
     } catch (err) {
-        log.error({ jobId, gameId, err: serializeError(err) }, '[Worker] job failed');
+        log.error(
+            { jobId, gameId, errFlat: pgErrFlat(err), stack: err?.stack },
+            '[Worker] job failed'
+        );
         await fail(jobId, err.message).catch(e =>
-            log.error({ jobId, err: serializeError(e) }, '[Worker] fail() error')
+            log.error({ jobId, errFlat: pgErrFlat(e), stack: e?.stack }, '[Worker] fail() error')
         );
     }
 }
@@ -99,26 +90,28 @@ function start() {
     _stopping = false;
     log.info('[Worker] started');
 
-    // Recover any jobs stuck in 'running' from a previous crashed process
-    recoverStaleJobs().catch(err =>
-        log.error({ err: serializeError(err) }, '[Worker] startup stale recovery error')
+    // Schema self-check — runs once, logs PASS or FAIL immediately
+    // This is the first thing that hits the DB on startup.
+    // If enrich_jobs is missing you will see the exact error within ~300ms.
+    checkSchema().catch(err =>
+        log.error({ errFlat: pgErrFlat(err), stack: err?.stack }, '[Worker] checkSchema error')
     );
 
-    // Also recover stale jobs periodically (every 5 minutes)
+    // Recover any jobs stuck in 'running' from a previous crashed process
+    recoverStaleJobs().catch(err =>
+        log.error({ errFlat: pgErrFlat(err), stack: err?.stack }, '[Worker] startup stale recovery error')
+    );
+
+    // Periodic stale recovery every 5 minutes
     _staleTimer = setInterval(() => {
         recoverStaleJobs().catch(err =>
-            log.error({ err: serializeError(err) }, '[Worker] periodic stale recovery error')
+            log.error({ errFlat: pgErrFlat(err), stack: err?.stack }, '[Worker] periodic stale recovery error')
         );
     }, STALE_RECOVERY_MS);
 
     _scheduleNext(500);
 }
 
-/**
- * Stop the worker cleanly.
- * - Stops scheduling new ticks
- * - Waits for in-flight jobs to finish (up to timeoutMs)
- */
 async function stop(timeoutMs = 30_000) {
     if (!_running) return;
     _stopping = true;
