@@ -72,27 +72,34 @@ async function upsertImage(client, gameId, source, imageType, sourceUrl, width, 
 }
 
 /**
- * Cover-specific upsert: overwrites stale cover rows so previously saved wrong
- * Epic covers get corrected on re-enrich. Clears cdn_url so the promote cron
- * re-uploads the new image to R2.
- * Assumes game_images has a unique constraint on (game_id, image_type) for covers,
- * or falls back to (game_id, source, image_type) — adjust the conflict target to
- * match your actual schema constraint.
+ * Cover-specific upsert: enforces exactly one authoritative cover row per game.
+ *
+ * Deletes ALL existing cover rows for the game first, then inserts a single
+ * fresh row. This is necessary because the production unique index is on
+ * (game_id, image_type, source) WHERE image_type IN ('cover','logo') — a
+ * three-column partial index — so a game can accumulate multiple historical
+ * cover rows from different sources (e.g. 'epic' + 'steamgriddb'). Updating
+ * all of them to the same source/url would violate that unique index, and
+ * leaving them in place creates ambiguous duplicate state.
+ *
+ * DELETE + INSERT inside the same transaction guarantees:
+ *   - exactly one cover row survives
+ *   - no unique-index conflicts
+ *   - cdn_url is NULL so the promote cron re-uploads the image to R2
+ *   - previously wrong Epic covers are corrected on re-enrich
  */
 async function upsertCover(client, gameId, source, sourceUrl, width, height) {
     if (!sourceUrl) return;
     await client.query(
+        `DELETE FROM game_images
+         WHERE  game_id    = $1
+           AND  image_type = 'cover'`,
+        [gameId]
+    );
+    await client.query(
         `INSERT INTO game_images
              (game_id, source, image_type, url, cdn_url, width, height, sort_order)
-         VALUES ($1,$2,'cover',$3, NULL,$4,$5,0)
-         ON CONFLICT (game_id, image_type)
-         DO UPDATE SET
-             url      = EXCLUDED.url,
-             source   = EXCLUDED.source,
-             cdn_url  = NULL,
-             width    = EXCLUDED.width,
-             height   = EXCLUDED.height,
-             fetched_at = now()`,
+         VALUES ($1,$2,'cover',$3,NULL,$4,$5,0)`,
         [gameId, source, sourceUrl, width || null, height || null]
     );
 }
