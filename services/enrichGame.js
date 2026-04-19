@@ -334,9 +334,11 @@ async function _lookupOnly(item) {
         // FIX #7: read direct poster/background fields first
         const { poster: epicPoster, background: epicBg } = _getEpicImages(epicPythonData);
 
-        coverSource = sgdbData.cover?.url
-            || epicPoster
-            // fallback to keyImages only if direct field absent
+        // Epic poster is the authoritative cover for Epic games.
+        // SGDB is a fallback when Epic has no poster, not a preferred source.
+        coverSource = epicPoster
+            || sgdbData.cover?.url
+            // last-resort keyImages scan when neither direct poster nor SGDB is available
             || _pickEpicImageType(epicPythonData?.keyImages, ['DieselGameBoxTall', 'OfferImageTall'])
             || igdbData?.images?.cover?.url
             || null;
