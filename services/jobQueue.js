@@ -186,6 +186,12 @@ async function getJobsByGame(gameId, limit = 10) {
  * If attempts >= max_attempts, they are moved to 'failed' instead.
  *
  * @returns {Promise<number>} count of jobs recovered
+ *
+ * FIX: The original used `($1 || ' minutes')::interval` which is not valid
+ * PostgreSQL syntax for parameterised interval construction — the cast operator
+ * cannot be applied to a runtime-concatenated text expression in all PG
+ * versions. Use `$1 * interval '1 minute'` instead, which is standard SQL and
+ * works on all PostgreSQL versions ≥ 9.
  */
 const STALE_THRESHOLD_MINUTES = 10;
 
@@ -200,7 +206,7 @@ async function recoverStaleJobs() {
                              ELSE error
                         END
          WHERE status = 'running'
-           AND started_at < now() - ($1 || ' minutes')::interval
+           AND started_at < now() - ($1 * interval '1 minute')
          RETURNING id, game_id, attempts, max_attempts`,
         [STALE_THRESHOLD_MINUTES]
     );

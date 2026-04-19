@@ -22,6 +22,20 @@ const worker                                   = require('./services/jobWorker')
 const { importAndEnqueueOne }                  = require('./services/importOrQueueService');
 const { validateClientEnrichRequest }          = require('./middleware/validateClientRequest');
 
+const app = express();
+
+// ─── Trust proxy ──────────────────────────────────────────────────────────────
+//
+// Railway (and most PaaS platforms) sit behind a reverse proxy that injects
+// X-Forwarded-For. Without this setting express-rate-limit throws:
+//   ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+// and req.ip resolves to the proxy's internal IP instead of the client's.
+//
+// '1' means: trust exactly one proxy hop — the Railway edge proxy.
+// Do not set this to 'true' (trust all) — that allows IP spoofing.
+//
+app.set('trust proxy', 1);
+
 const allowedOrigins = (process.env.CORS_ORIGIN || '').split(',').map(o => o.trim()).filter(Boolean);
 const corsOptions = {
     origin: (origin, cb) => {
@@ -48,7 +62,6 @@ const clientEnrichLimiter = rateLimit({
     message: { status: 'error', message: 'Too many requests — please wait before retrying' },
 });
 
-const app = express();
 app.use(cors(corsOptions));
 app.use(requestId);
 app.use(express.json({ limit: '2mb' }));
@@ -234,7 +247,7 @@ app.post('/games/import', requireAuth, adminLimiter, validateImport, async (req,
     res.status(200).json({ status: 'success', found, pending, summary: { total: games.length, found: found.length, pending: pending.length } });
 
     if (pending.length > 0) {
-        fetchAndSaveGames(pending).catch(err => log.error({ err: err.message }, '[Import] Background error'));
+        fetchAndSaveGames(pending).catch(err => log.error({ err: err.message, stack: err.stack }, '[Import] Background error'));
     }
 });
 
@@ -282,7 +295,7 @@ async function fetchAndSaveGames(pending) {
 
             await enqueue({ gameId, platform, externalId: id, clientData: item });
         } catch (err) {
-            log.error({ platform: item.platform, id: item.id, err: err.message }, '[Import] save error');
+            log.error({ platform: item.platform, id: item.id, err: err.message, stack: err.stack, code: err.code }, '[Import] save error');
         }
         await delay(300);
     }

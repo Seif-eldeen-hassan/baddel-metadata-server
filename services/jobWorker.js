@@ -26,6 +26,20 @@ let _timer        = null;
 let _staleTimer   = null;
 let _inFlight     = 0;
 
+// ─── Error serialiser — includes stack + PostgreSQL error code ────────────────
+
+function serializeError(err) {
+    return {
+        message: err?.message,
+        stack:   err?.stack,
+        // PostgreSQL driver surfaces these on query errors
+        code:    err?.code,       // e.g. '42P01' (undefined_table), '23505' (unique_violation)
+        detail:  err?.detail,
+        hint:    err?.hint,
+        where:   err?.where,
+    };
+}
+
 // ─── Main poll loop ───────────────────────────────────────────────────────────
 
 async function _tick() {
@@ -35,7 +49,7 @@ async function _tick() {
     try {
         jobs = await claimBatch();
     } catch (err) {
-        log.error({ err: err.message }, '[Worker] claimBatch error');
+        log.error({ err: serializeError(err) }, '[Worker] claimBatch error');
         _scheduleNext(POLL_INTERVAL_MS);
         return;
     }
@@ -65,9 +79,9 @@ async function _processJob(job) {
         await complete(jobId);
         log.info({ jobId, gameId }, '[Worker] job complete');
     } catch (err) {
-        log.error({ jobId, gameId, err: err.message }, '[Worker] job failed');
+        log.error({ jobId, gameId, err: serializeError(err) }, '[Worker] job failed');
         await fail(jobId, err.message).catch(e =>
-            log.error({ jobId, err: e.message }, '[Worker] fail() error')
+            log.error({ jobId, err: serializeError(e) }, '[Worker] fail() error')
         );
     }
 }
@@ -87,13 +101,13 @@ function start() {
 
     // Recover any jobs stuck in 'running' from a previous crashed process
     recoverStaleJobs().catch(err =>
-        log.error({ err: err.message }, '[Worker] startup stale recovery error')
+        log.error({ err: serializeError(err) }, '[Worker] startup stale recovery error')
     );
 
     // Also recover stale jobs periodically (every 5 minutes)
     _staleTimer = setInterval(() => {
         recoverStaleJobs().catch(err =>
-            log.error({ err: err.message }, '[Worker] periodic stale recovery error')
+            log.error({ err: serializeError(err) }, '[Worker] periodic stale recovery error')
         );
     }, STALE_RECOVERY_MS);
 
