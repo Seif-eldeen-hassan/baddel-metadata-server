@@ -24,6 +24,8 @@ const { importAndEnqueueOne }                  = require('./services/importOrQue
 const { validateClientEnrichRequest }          = require('./middleware/validateClientRequest');
 const { validateClientBatchRequest,
         MAX_BATCH_SIZE }                       = require('./middleware/validateClientBatchRequest');
+const { validateResolveMetadataRequest }  = require('./middleware/validateResolveMetadataRequest');
+const { resolveTransient }                = require('./services/transientResolver');
 
 const app = express();
 
@@ -148,6 +150,30 @@ function clientEnrichRateLimitHandler(req, res, _next, options) {
     });
 }
 
+const clientResolveLimiterByInstall = rateLimit({
+    windowMs:        5 * 60 * 1000,
+    limit:           30,
+    keyGenerator:    clientEnrichKey,   // reuse the same install-id extractor
+    standardHeaders: true,
+    legacyHeaders:   false,
+    handler: (req, res, _next, options) => {
+        const retryAfterRaw     = res.getHeader('Retry-After');
+        const retryAfterSeconds = retryAfterRaw ? Number(retryAfterRaw) : null;
+        log.warn({ reqId: req.id, event: 'rate_limited_resolve', key: clientEnrichKey(req), ip: req.ip, retryAfterSeconds }, '[Client] resolve-metadata rate limited');
+        return res.status(options.statusCode ?? 429).json({ status: 'error', message: 'Too many requests — slow down and retry', retryAfterSeconds });
+    },
+});
+ 
+const clientResolveLimiterByIp = rateLimit({
+    windowMs:        5 * 60 * 1000,
+    limit:           15,
+    keyGenerator:    (req) => `ip:${ipKeyGenerator(req)}`,
+    standardHeaders: true,
+    legacyHeaders:   false,
+});
+ 
+const clientResolveLimiter = [clientResolveLimiterByInstall, clientResolveLimiterByIp];
+
 // Tier A: keyed by install-id (primary) — 120 req / 5 min
 const clientEnrichLimiterByInstall = rateLimit({
     windowMs:        5 * 60 * 1000,   // 5-minute window
@@ -157,6 +183,7 @@ const clientEnrichLimiterByInstall = rateLimit({
     legacyHeaders:   false,
     handler:         clientEnrichRateLimitHandler,
 });
+
 
 // Tier B: always-on per-IP guard — 60 req / 5 min
 // Runs after Tier A; catches IP-level abuse regardless of install-id header.
@@ -479,6 +506,52 @@ app.post('/client/request-enrich/batch', ...clientBatchLimiter, validateClientBa
         results,
     });
 });
+
+app.post(
+    '/client/resolve-metadata',
+    ...clientResolveLimiter,
+    validateResolveMetadataRequest,
+    async (req, res, next) => {
+        const { title, slug, platformHint, exeName, folderName, command, pathHint, igdbId } = req.body;
+        const installId  = (req.headers['x-baddel-install-id']  || '').trim() || null;
+        const appVersion = (req.headers['x-baddel-app-version'] || '').trim() || null;
+ 
+        log.info({
+            reqId:       req.id,
+            title,
+            platformHint: platformHint || null,
+            igdbId:       igdbId       || null,
+            installId,
+            appVersion,
+            ip:          req.ip,
+        }, '[Client] resolve-metadata received');
+ 
+        try {
+            const result = await resolveTransient({
+                title, slug, platformHint, exeName, folderName, command, pathHint, igdbId,
+            });
+ 
+            log.info({
+                reqId:      req.id,
+                title,
+                status:     result.status,
+                confidence: result.confidence,
+                matched:    result.debug?.selectedCandidate || null,
+                igdbId:     result.meta?.igdbId || null,
+                installId,
+            }, '[Client] resolve-metadata result');
+ 
+            const httpStatus = result.status === 'resolved' ? 200
+                             : result.status === 'ambiguous' ? 200
+                             : 404;
+ 
+            return res.status(httpStatus).json(result);
+        } catch (err) {
+            next(err);
+        }
+    }
+);
+
 app.get('/games/lookup', lookupLimiter, validateLookup, async (req, res, next) => {
     const { uuid, platform, namespace, id, slug, title } = req.query;
     try {

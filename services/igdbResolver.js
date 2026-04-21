@@ -438,4 +438,4 @@ async function resolveAndFetch(platform, externalId, title) {
     return { igdbId, data };
 }
 
-module.exports = { resolveIgdbGameId, fetchIgdbGameData, resolveAndFetch };
+module.exports = { resolveIgdbGameId, fetchIgdbGameData, resolveAndFetch, igdbFetch };
