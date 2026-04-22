@@ -541,9 +541,10 @@ app.post(
                 installId,
             }, '[Client] resolve-metadata result');
  
-            const httpStatus = result.status === 'resolved' ? 200
-                             : result.status === 'ambiguous' ? 200
-                             : 404;
+            const httpStatus = result.status === 'resolved'  ? 200
+                             : result.status === 'ambiguous'  ? 200
+                             : result.status === 'art_only'   ? 200
+                             : 200;   // not_found — still 200 with structured body; 404 caused ApiError throws on the client
  
             return res.status(httpStatus).json(result);
         } catch (err) {

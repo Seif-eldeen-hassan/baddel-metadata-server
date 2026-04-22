@@ -86,21 +86,57 @@ const TRANSIENT_FIELDS = `
 
 // ─── Name candidate builder (mirrors igdbResolver's logic) ───────────────────
 
-function buildCandidates(rawTitle) {
+/**
+ * Build an ordered list of IGDB search candidates from rawTitle + optional hints.
+ *
+ * Priority order:
+ *   1. rawTitle (stored game name, may be concatenated like "ACMirage")
+ *   2. suffix-stripped variants of rawTitle (demo / prologue / trial / chapter)
+ *   3. hints.exeName  — exe stem extracted from the install path (e.g. "AC Mirage")
+ *   4. suffix-stripped variants of exeName
+ *   5. hints.folderName — parent folder of the install path (e.g. "Assassin's Creed Mirage")
+ *   6. suffix-stripped variants of folderName
+ *
+ * Duplicates are silently dropped.  Empty / whitespace-only strings are filtered.
+ *
+ * @param {string} rawTitle
+ * @param {{ exeName?: string, folderName?: string }} [hints]
+ * @returns {string[]}
+ */
+function buildCandidates(rawTitle, hints = {}) {
     const push = (arr, val) => {
         const v = val?.trim();
         if (v && !arr.includes(v)) arr.push(v);
     };
 
-    const candidates = [rawTitle];
+    // Strip common suffixes from any candidate string and push all variants
+    const pushWithVariants = (arr, base) => {
+        if (!base?.trim()) return;
+        push(arr, base);
 
-    const noDemo = rawTitle.replace(/\s*[\(-]\s*demo\s*\)?$/i, '').replace(/\s+demo$/i, '').trim();
-    push(candidates, noDemo);
-    const base = noDemo || rawTitle;
+        const noDemo = base.replace(/\s*[\(-]\s*demo\s*\)?$/i, '').replace(/\s+demo$/i, '').trim();
+        push(arr, noDemo);
+        const stripped = noDemo || base;
 
-    push(candidates, base.replace(/\s*[–\-]?\s*\(?\bprologue\b\)?$/i, '').trim());
-    push(candidates, base.replace(/\s*[–\-]?\s*\(?\bfree\s+trial\b\)?$/i, '').replace(/\s*[–\-]\s*\(?\btrial\b\)?$/i, '').trim());
-    push(candidates, base.replace(/\s*[–-]?\s*chapter[:\s]\S.*$/i, '').trim());
+        push(arr, stripped.replace(/\s*[–\-]?\s*\(?\bprologue\b\)?$/i, '').trim());
+        push(arr, stripped.replace(/\s*[–\-]?\s*\(?\bfree\s+trial\b\)?$/i, '').replace(/\s*[–\-]\s*\(?\btrial\b\)?$/i, '').trim());
+        push(arr, stripped.replace(/\s*[–-]?\s*chapter[:\s]\S.*$/i, '').trim());
+    };
+
+    const candidates = [];
+
+    // 1–2: stored title + its suffix-stripped variants
+    pushWithVariants(candidates, rawTitle);
+
+    // 3–4: exe stem hint (e.g. "AC Mirage") — richer than the stored title
+    if (hints.exeName && hints.exeName.trim() !== rawTitle.trim()) {
+        pushWithVariants(candidates, hints.exeName.trim());
+    }
+
+    // 5–6: parent-folder hint (e.g. "Assassin's Creed Mirage") — fullest name available
+    if (hints.folderName && hints.folderName.trim() !== rawTitle.trim()) {
+        pushWithVariants(candidates, hints.folderName.trim());
+    }
 
     return [...new Set(candidates)].filter(Boolean);
 }
@@ -506,7 +542,17 @@ async function resolveTransient(hints) {
 
     // ── Build name candidates ─────────────────────────────────────────────────
     const raw        = title.replace(/['"®™©]/g, '').trim();
-    const candidates = buildCandidates(raw);
+    const candidates = buildCandidates(raw, { exeName: hints.exeName, folderName: hints.folderName });
+
+    // ── Log the full expanded candidate list for diagnostics ─────────────────
+    log.info({
+        requestId,
+        title,
+        exeName:           hints.exeName    || null,
+        folderName:        hints.folderName || null,
+        expandedCandidates: candidates,
+        expandedCount:      candidates.length,
+    }, '[TransientResolver] expanded search candidates');
 
     let bestResult = null;
 
