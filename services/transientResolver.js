@@ -131,6 +131,81 @@ function _imgUrl(imageId, size = '720p') {
     return imageId ? `https://images.igdb.com/igdb/image/upload/t_${size}/${imageId}.jpg` : null;
 }
 
+// ─── Payload quality guards ───────────────────────────────────────────────────
+
+/**
+ * Returns true when a normalized meta payload has at least one useful text
+ * signal from a trusted metadata source (IGDB).
+ *
+ * SGDB alone provides cover/hero/logo — that is art, not metadata.
+ * A payload missing ALL of the following is art-only and MUST NOT be
+ * returned as `resolved`:
+ *   • description or storyline
+ *   • developer or publisher (from IGDB involved_companies)
+ *   • at least one IGDB screenshot (trusted media from a metadata source)
+ *
+ * @param {object} meta — result of _normalizeMeta()
+ * @returns {boolean}
+ */
+function _hasUsableTextMeta(meta) {
+    if (!meta) return false;
+    const hasDescription = !!(meta.description || meta.storyline);
+    const hasCompany     = !!(meta.developer || meta.publisher);
+    // screenshots come from IGDB — they are a metadata-source signal
+    const hasIgdbScreenshots = Array.isArray(meta.images?.screenshots) && meta.images.screenshots.length > 0;
+    return hasDescription || hasCompany || hasIgdbScreenshots;
+}
+
+/**
+ * Sanitize a normalized meta payload before returning it to callers.
+ * Mutates and returns the same object.
+ *
+ * Rules applied:
+ *   - title must never be null  → fall back to igdbSlug, then ''
+ *   - genres: drop null/empty entries
+ *   - videos: drop any entry whose URL contains 'undefined' or is falsy
+ *   - if no valid videos remain, delete the videos array entirely
+ *
+ * @param {object} meta — result of _normalizeMeta()
+ * @param {string} [fallbackTitle] — original request title, used if meta.title is null
+ * @returns {object}
+ */
+function _sanitizePayload(meta, fallbackTitle) {
+    if (!meta) return meta;
+
+    // Title must never be null
+    if (!meta.title) {
+        meta.title = meta.slug || fallbackTitle || '';
+        log.warn({ title: meta.title, igdbId: meta.igdbId }, '[TransientResolver] sanitize: meta.title was null — using fallback');
+    }
+
+    // Genres: filter out null/empty
+    if (Array.isArray(meta.genres)) {
+        meta.genres = meta.genres.filter(g => g && typeof g === 'string' && g.trim().length > 0);
+    }
+
+    // Videos: reject any entry with a missing/undefined video_id in the URL
+    if (Array.isArray(meta.videos)) {
+        const validVideos = meta.videos.filter(v => {
+            if (!v?.url) return false;
+            // Reject URLs that contain the literal string 'undefined'
+            if (v.url.includes('undefined')) {
+                log.warn({ url: v.url, igdbId: meta.igdbId }, '[TransientResolver] sanitize: dropping trailer with undefined in URL');
+                return false;
+            }
+            return true;
+        });
+        if (validVideos.length === 0) {
+            // Omit trailer fields entirely rather than returning empty array
+            delete meta.videos;
+        } else {
+            meta.videos = validVideos;
+        }
+    }
+
+    return meta;
+}
+
 // ─── Normalize IGDB game object → response meta ───────────────────────────────
 
 function _normalizeMeta(igdbData, sgdbImages) {
@@ -249,6 +324,18 @@ function _normalizeMeta(igdbData, sgdbImages) {
  */
 async function resolveTransient(hints) {
     const title = (hints.title || '').trim();
+
+    // ── Structured request log ───────────────────────────────────────────────
+    log.info({
+        title,
+        slug:         hints.slug         || null,
+        platformHint: hints.platformHint || null,
+        igdbId:       hints.igdbId       || null,
+        releaseYear:  hints.releaseYear  || null,
+        developer:    hints.developer    || null,
+        publisher:    hints.publisher    || null,
+    }, '[TransientResolver] request START');
+
     if (!title) {
         return {
             status:     'not_found',
@@ -263,7 +350,7 @@ async function resolveTransient(hints) {
     const ck = _cacheKey(hints);
     const cached = _cacheGet(ck);
     if (cached) {
-        log.info({ title }, '[TransientResolver] cache hit');
+        log.info({ title, status: cached.status }, '[TransientResolver] cache hit');
         return cached;
     }
 
@@ -276,11 +363,45 @@ async function resolveTransient(hints) {
             const gameData = await fetchIgdbGameData(hints.igdbId);
             if (gameData) {
                 const sgdbImages = await resolveSgdbImages({ igdbId: hints.igdbId, title }).catch(() => ({ cover: null, hero: null, logo: null }));
-                const meta       = _normalizeMeta(gameData, sgdbImages);
-                const result     = {
+                const meta       = _sanitizePayload(_normalizeMeta(gameData, sgdbImages), title);
+                const hasSgdb    = !!(sgdbImages?.cover || sgdbImages?.hero || sgdbImages?.logo);
+                const hasText    = _hasUsableTextMeta(meta);
+
+                log.info({
+                    title,
+                    igdbId:          hints.igdbId,
+                    matchedTitle:    meta.title,
+                    igdbFetchOk:     true,
+                    hasText,
+                    isSgdbOnly:      !hasText && hasSgdb,
+                    hasSgdbArt:      hasSgdb,
+                }, '[TransientResolver] direct-ID detail');
+
+                // Direct ID path: still enforce text-metadata requirement
+                if (!hasText) {
+                    log.warn({ title, igdbId: hints.igdbId }, '[TransientResolver] direct-ID result is art-only — returning art_only');
+                    const result = {
+                        status:     'art_only',
+                        confidence: 50,
+                        sources:    hasSgdb ? ['igdb', 'steamgriddb'] : ['igdb'],
+                        meta:       null,
+                        debug: {
+                            selectedCandidate: gameData.name || null,
+                            margin:            50,
+                            scoreBreakdown:    { directIdMatch: 50 },
+                            allScores:         [],
+                            candidatesTried:   [],
+                            artOnlyReason:     'no_text_meta_from_igdb',
+                        },
+                    };
+                    _cacheSet(ck, result);
+                    return result;
+                }
+
+                const result = {
                     status:     'resolved',
                     confidence: 95, // direct ID match
-                    sources:    ['igdb', sgdbImages?.cover ? 'steamgriddb' : null].filter(Boolean),
+                    sources:    ['igdb', hasSgdb ? 'steamgriddb' : null].filter(Boolean),
                     meta,
                     debug: {
                         selectedCandidate: gameData.name || null,
@@ -291,6 +412,7 @@ async function resolveTransient(hints) {
                     },
                 };
                 _cacheSet(ck, result);
+                log.info({ title, igdbId: hints.igdbId, matchedTitle: meta.title }, '[TransientResolver] direct-ID resolved');
                 return result;
             }
         } catch (err) {
@@ -309,9 +431,23 @@ async function resolveTransient(hints) {
         log.info({ candidate }, '[TransientResolver] searching IGDB');
 
         const results = await _igdbSearch(candidate);
+        log.info({
+            candidate,
+            igdbCandidateCount: results.length,
+        }, '[TransientResolver] IGDB search result count');
+
         if (!results.length) continue;
 
         const picked = pickBestCandidate(results, { ...hints, title: candidate });
+
+        log.info({
+            candidate,
+            pickerStatus:    picked.status,
+            topScore:        picked.allScores[0]?.score ?? null,
+            topCandidateName: picked.allScores[0]?.name ?? null,
+            threshold:       45,   // mirrors THRESHOLD constant in transientConfidenceScorer
+            margin:          picked.margin,
+        }, '[TransientResolver] pickBestCandidate result');
 
         if (picked.status === 'resolved') {
             bestResult = { picked, candidateUsed: candidate };
@@ -347,6 +483,16 @@ async function resolveTransient(hints) {
     // ── Build response ────────────────────────────────────────────────────────
 
     if (!bestResult || bestResult.picked.status === 'not_found') {
+        const topScore = bestResult?.picked?.allScores?.[0];
+        log.info({
+            title,
+            candidatesTried,
+            topCandidateName: topScore?.name ?? null,
+            topScore:         topScore?.score ?? null,
+            threshold:        45,
+            reason:           bestResult ? 'below_threshold' : 'no_igdb_results',
+        }, '[TransientResolver] not_found');
+
         const result = {
             status:     'not_found',
             confidence: bestResult?.picked?.score || 0,
@@ -361,7 +507,6 @@ async function resolveTransient(hints) {
             },
         };
         _cacheSet(ck, result);
-        log.info({ title, candidatesTried }, '[TransientResolver] not_found');
         return result;
     }
 
@@ -371,8 +516,10 @@ async function resolveTransient(hints) {
 
     // Fetch full IGDB data for the winner (it may have fewer fields from search)
     let fullGameData = null;
+    let igdbDetailFetchOk = false;
     try {
         fullGameData = await fetchIgdbGameData(winnerRaw.id);
+        igdbDetailFetchOk = !!fullGameData;
     } catch (err) {
         log.warn({ igdbId: winnerRaw.id, err: err.message }, '[TransientResolver] fetchIgdbGameData failed, using search result');
     }
@@ -385,10 +532,68 @@ async function resolveTransient(hints) {
         title:  winnerRaw.name,
     }).catch(() => ({ cover: null, hero: null, logo: null }));
 
-    const meta    = _normalizeMeta(gameDataToUse, sgdbImages);
-    const sources = ['igdb'];
-    if (sgdbImages?.cover || sgdbImages?.hero || sgdbImages?.logo) sources.push('steamgriddb');
+    const meta    = _sanitizePayload(_normalizeMeta(gameDataToUse, sgdbImages), title);
+    const hasSgdb = !!(sgdbImages?.cover || sgdbImages?.hero || sgdbImages?.logo);
+    const hasText = _hasUsableTextMeta(meta);
 
+    // ── CRITICAL QUALITY GATE ────────────────────────────────────────────────
+    // An IGDB match that returned no usable text metadata means IGDB has very
+    // sparse data for this title (common for Microsoft store exclusives such as
+    // Microsoft Jigsaw, Microsoft Solitaire, etc.).
+    // SGDB may still have matched art by name.  That is art-only, NOT resolved.
+    // Return 'art_only' so the launcher can decide whether to show partial art
+    // without persisting it as a resolved game.
+    const isSgdbOnly = !hasText && hasSgdb;
+
+    log.info({
+        title,
+        matchedTitle:       meta.title,
+        igdbId:             winnerRaw.id,
+        igdbScore:          picked.score,
+        igdbMargin:         picked.margin,
+        threshold:          45,
+        igdbDetailFetchOk,
+        hasDescription:     !!(meta.description || meta.storyline),
+        hasDeveloper:       !!meta.developer,
+        hasPublisher:       !!meta.publisher,
+        hasIgdbScreenshots: (meta.images?.screenshots?.length ?? 0) > 0,
+        hasText,
+        hasSgdbArt:         hasSgdb,
+        isSgdbOnly,
+        pickerStatus:       picked.status,
+    }, '[TransientResolver] quality assessment');
+
+    if (!hasText) {
+        log.warn({
+            title,
+            igdbId:      winnerRaw.id,
+            matchedTitle: meta.title,
+            isSgdbOnly,
+        }, '[TransientResolver] result is art-only (no text metadata from IGDB) — returning art_only instead of resolved');
+
+        const result = {
+            status:     'art_only',
+            confidence: picked.score,
+            sources:    ['igdb', hasSgdb ? 'steamgriddb' : null].filter(Boolean),
+            meta:       null,   // never expose art-only payloads as `meta` — callers expect text
+            debug: {
+                selectedCandidate: winnerRaw.name,
+                candidateUsed,
+                margin:            picked.margin,
+                scoreBreakdown:    topScore?.breakdown || null,
+                allScores:         picked.allScores,
+                candidatesTried,
+                artOnlyReason:     igdbDetailFetchOk ? 'igdb_text_empty' : 'igdb_detail_fetch_failed',
+            },
+        };
+        _cacheSet(ck, result);
+        return result;
+    }
+
+    const sources = ['igdb'];
+    if (hasSgdb) sources.push('steamgriddb');
+
+    // For ambiguous results: only expose meta if it has text (already guaranteed above)
     const result = {
         status:     picked.status,   // 'resolved' or 'ambiguous'
         confidence: picked.score,
@@ -420,6 +625,8 @@ async function resolveTransient(hints) {
         matched:    winnerRaw.name,
         igdbId:     winnerRaw.id,
         margin:     picked.margin,
+        hasText,
+        hasSgdbArt: hasSgdb,
     }, '[TransientResolver] resolved');
 
     return result;
