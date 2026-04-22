@@ -26,6 +26,7 @@ const { igdbFetch: _igdbFetch, fetchIgdbGameData } = require('./igdbResolver');
 const { resolveSgdbImages }                        = require('./steamGridDbResolver');
 const { pickBestCandidate }                        = require('./transientConfidenceScorer');
 const log                                          = require('../config/logger');
+const { randomUUID }                               = require('crypto');
 
 // ─── Minimal in-process cache ─────────────────────────────────────────────────
 
@@ -324,9 +325,11 @@ function _normalizeMeta(igdbData, sgdbImages) {
  */
 async function resolveTransient(hints) {
     const title = (hints.title || '').trim();
+    const requestId = randomUUID();
 
     // ── Structured request log ───────────────────────────────────────────────
     log.info({
+        requestId,
         title,
         slug:         hints.slug         || null,
         platformHint: hints.platformHint || null,
@@ -350,7 +353,7 @@ async function resolveTransient(hints) {
     const ck = _cacheKey(hints);
     const cached = _cacheGet(ck);
     if (cached) {
-        log.info({ title, status: cached.status }, '[TransientResolver] cache hit');
+        log.info({ requestId, title, status: cached.status }, '[TransientResolver] cache hit');
         return cached;
     }
 
@@ -358,7 +361,7 @@ async function resolveTransient(hints) {
 
     // ── If caller already has an IGDB ID, skip search ────────────────────────
     if (hints.igdbId) {
-        log.info({ title, igdbId: hints.igdbId }, '[TransientResolver] direct IGDB ID path');
+        log.info({ requestId, title, igdbId: hints.igdbId }, '[TransientResolver] direct IGDB ID path');
         try {
             const gameData = await fetchIgdbGameData(hints.igdbId);
             if (gameData) {
@@ -368,6 +371,7 @@ async function resolveTransient(hints) {
                 const hasText    = _hasUsableTextMeta(meta);
 
                 log.info({
+                    requestId,
                     title,
                     igdbId:          hints.igdbId,
                     matchedTitle:    meta.title,
@@ -379,7 +383,7 @@ async function resolveTransient(hints) {
 
                 // Direct ID path: still enforce text-metadata requirement
                 if (!hasText) {
-                    log.warn({ title, igdbId: hints.igdbId }, '[TransientResolver] direct-ID result is art-only — returning art_only');
+                    log.warn({ requestId, title, igdbId: hints.igdbId }, '[TransientResolver] direct-ID result is art-only — returning art_only');
                     const result = {
                         status:     'art_only',
                         confidence: 50,
@@ -412,11 +416,11 @@ async function resolveTransient(hints) {
                     },
                 };
                 _cacheSet(ck, result);
-                log.info({ title, igdbId: hints.igdbId, matchedTitle: meta.title }, '[TransientResolver] direct-ID resolved');
+                log.info({ requestId, title, igdbId: hints.igdbId, matchedTitle: meta.title }, '[TransientResolver] direct-ID resolved');
                 return result;
             }
         } catch (err) {
-            log.warn({ title, igdbId: hints.igdbId, err: err.message }, '[TransientResolver] direct IGDB fetch failed, falling back to search');
+            log.warn({ requestId, title, igdbId: hints.igdbId, err: err.message }, '[TransientResolver] direct IGDB fetch failed, falling back to search');
         }
     }
 
@@ -428,10 +432,11 @@ async function resolveTransient(hints) {
 
     for (const candidate of candidates) {
         candidatesTried.push(candidate);
-        log.info({ candidate }, '[TransientResolver] searching IGDB');
+        log.info({ requestId, candidate }, '[TransientResolver] searching IGDB');
 
         const results = await _igdbSearch(candidate);
         log.info({
+            requestId,
             candidate,
             igdbCandidateCount: results.length,
         }, '[TransientResolver] IGDB search result count');
@@ -441,6 +446,7 @@ async function resolveTransient(hints) {
         const picked = pickBestCandidate(results, { ...hints, title: candidate });
 
         log.info({
+            requestId,
             candidate,
             pickerStatus:    picked.status,
             topScore:        picked.allScores[0]?.score ?? null,
@@ -485,6 +491,7 @@ async function resolveTransient(hints) {
     if (!bestResult || bestResult.picked.status === 'not_found') {
         const topScore = bestResult?.picked?.allScores?.[0];
         log.info({
+            requestId,
             title,
             candidatesTried,
             topCandidateName: topScore?.name ?? null,
@@ -521,7 +528,7 @@ async function resolveTransient(hints) {
         fullGameData = await fetchIgdbGameData(winnerRaw.id);
         igdbDetailFetchOk = !!fullGameData;
     } catch (err) {
-        log.warn({ igdbId: winnerRaw.id, err: err.message }, '[TransientResolver] fetchIgdbGameData failed, using search result');
+        log.warn({ requestId, igdbId: winnerRaw.id, err: err.message }, '[TransientResolver] fetchIgdbGameData failed, using search result');
     }
 
     // ── DEBUG LOG 1: raw field values from both the search object and the
@@ -555,6 +562,7 @@ async function resolveTransient(hints) {
     //     If fullGameData.title != winnerRaw.name
     //     → fetchIgdbGameData fetched a DIFFERENT record (Case C).
     log.info({
+        requestId,
         // ── winnerRaw: raw IGDB search object ────────────────────────────────
         winnerRaw_id:                     winnerRaw.id,
         winnerRaw_name:                   winnerRaw.name,
@@ -609,6 +617,7 @@ async function resolveTransient(hints) {
     //   whether the gate is too strict.
     const _hasTextDebug = _hasUsableTextMeta(meta);
     log.info({
+        requestId,
         igdbId:               winnerRaw.id,
         // ── Fields _hasUsableTextMeta() CHECKS (any truthy → accepted) ───────
         meta_title:           meta.title                                    ?? null,
@@ -617,9 +626,9 @@ async function resolveTransient(hints) {
         meta_developer:       meta.developer                                ?? null,
         meta_publisher:       meta.publisher                                ?? null,
         meta_screenshots_len: (meta.images?.screenshots || []).length,
+        meta_videos_len:      (meta.videos || []).length,
         hasUsableTextMeta:    _hasTextDebug,
         // ── Fields the gate currently IGNORES ────────────────────────────────
-        meta_videos_len:      (meta.videos || []).length,
         meta_videos_urls:     (meta.videos || []).map(v => v.url ?? null),
         meta_genres:          meta.genres                                   ?? null,
         meta_ratings:         meta.ratings                                  ?? null,
@@ -627,8 +636,6 @@ async function resolveTransient(hints) {
         meta_has_hero:        !!(meta.images?.hero?.url),
         meta_has_logo:        !!(meta.images?.logo?.url),
         // ── One-line verdict ─────────────────────────────────────────────────
-        // true  → gate is too strict; IGDB has real signal just not in text form
-        // false → IGDB is genuinely empty for this title
         DIAG_non_text_igdb_signal_exists:
             (meta.videos  || []).length > 0
             || (meta.ratings || []).length > 0
@@ -647,6 +654,7 @@ async function resolveTransient(hints) {
     const isSgdbOnly = !hasText && hasSgdb;
 
     log.info({
+        requestId,
         title,
         matchedTitle:       meta.title,
         igdbId:             winnerRaw.id,
@@ -666,6 +674,7 @@ async function resolveTransient(hints) {
 
     if (!hasText) {
         log.warn({
+            requestId,
             title,
             igdbId:      winnerRaw.id,
             matchedTitle: meta.title,
@@ -720,6 +729,7 @@ async function resolveTransient(hints) {
     _cacheSet(ck, result);
 
     log.info({
+        requestId,
         title,
         status:     result.status,
         confidence: result.confidence,
