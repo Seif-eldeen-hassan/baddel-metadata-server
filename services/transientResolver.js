@@ -292,6 +292,60 @@ function _normalizeMeta(igdbData, sgdbImages) {
     };
 }
 
+// ─── Merge already-normalized fetchIgdbGameData() result with SGDB images ────
+//
+// fetchIgdbGameData() in igdbResolver.js already normalizes the raw IGDB wire
+// object into the same schema that _normalizeMeta() would produce.  The only
+// thing left to do is overlay the SteamGridDB images (cover/hero/logo) exactly
+// as _normalizeMeta() does, without re-reading IGDB raw fields that no longer
+// exist on the object.
+//
+// Input  (fullGameData from fetchIgdbGameData):
+//   { igdbId, title, slug, releaseYear, description, storyline,
+//     genres[], tags[], developer, publisher, ratings[],
+//     images: { cover, logo, artworks[], screenshots[] },
+//     videos[{ url, thumb, title }], platforms[] }
+//
+// Output: same shape — ready for _sanitizePayload() and _hasUsableTextMeta().
+
+function _mergeNormalizedWithSgdb(normalizedData, sgdbImages) {
+    // Deep-clone images so we do not mutate fetchIgdbGameData's return value
+    const images = {
+        cover:       normalizedData.images?.cover       || null,
+        logo:        normalizedData.images?.logo        || null,
+        hero:        null,
+        artworks:    normalizedData.images?.artworks    || [],
+        screenshots: normalizedData.images?.screenshots || [],
+    };
+
+    // Prefer SteamGridDB art over IGDB equivalents (same priority as _normalizeMeta)
+    if (sgdbImages?.cover?.url) images.cover = sgdbImages.cover;
+    if (sgdbImages?.hero?.url)  images.hero  = sgdbImages.hero;
+    else {
+        // Fall back to first IGDB artwork as hero if SGDB has none
+        const firstArtwork = normalizedData.images?.artworks?.[0];
+        if (firstArtwork?.url) images.hero = firstArtwork;
+    }
+    if (sgdbImages?.logo?.url)  images.logo  = sgdbImages.logo;
+
+    return {
+        igdbId:      normalizedData.igdbId,
+        title:       normalizedData.title,
+        slug:        normalizedData.slug,
+        releaseYear: normalizedData.releaseYear,
+        description: normalizedData.description,
+        storyline:   normalizedData.storyline,
+        genres:      normalizedData.genres      || [],
+        tags:        normalizedData.tags        || [],
+        developer:   normalizedData.developer   || null,
+        publisher:   normalizedData.publisher   || null,
+        ratings:     normalizedData.ratings     || [],
+        images,
+        videos:      normalizedData.videos      || [],
+        platforms:   normalizedData.platforms   || [],
+    };
+}
+
 // ─── Public resolver ──────────────────────────────────────────────────────────
 
 /**
@@ -365,8 +419,32 @@ async function resolveTransient(hints) {
         try {
             const gameData = await fetchIgdbGameData(hints.igdbId);
             if (gameData) {
+                // ── SCHEMA GUARD ──────────────────────────────────────────────────────
+                // fetchIgdbGameData() returns an ALREADY-NORMALIZED object (not raw IGDB
+                // wire format). Passing it into _normalizeMeta() produces silent nulls:
+                //   g.name        → undefined (it's gameData.title)
+                //   g.summary     → undefined (it's gameData.description)
+                //   g.involved_companies → undefined (it's gameData.publisher/developer)
+                //   v.video_id    → undefined (videos are already {url, thumb, title})
+                // Fix: use _mergeNormalizedWithSgdb() which understands the normalized schema.
+                log.info({
+                    requestId,
+                    igdbId:                 hints.igdbId,
+                    gameData_keys:          Object.keys(gameData),
+                    has_name:               'name'               in gameData,
+                    has_title:              'title'              in gameData,
+                    has_summary:            'summary'            in gameData,
+                    has_description:        'description'        in gameData,
+                    has_involved_companies: 'involved_companies' in gameData,
+                    has_publisher:          'publisher'          in gameData,
+                    videos_0_keys:          gameData.videos?.[0] ? Object.keys(gameData.videos[0]) : [],
+                    has_video_id_in_v0:     'video_id' in (gameData.videos?.[0] ?? {}),
+                    has_url_in_v0:          'url'      in (gameData.videos?.[0] ?? {}),
+                }, '[TransientResolver] DEBUG schema inspection (direct-ID path)');
+
                 const sgdbImages = await resolveSgdbImages({ igdbId: hints.igdbId, title }).catch(() => ({ cover: null, hero: null, logo: null }));
-                const meta       = _sanitizePayload(_normalizeMeta(gameData, sgdbImages), title);
+                // fetchIgdbGameData already normalized — merge SGDB art, do NOT re-normalize
+                const meta       = _sanitizePayload(_mergeNormalizedWithSgdb(gameData, sgdbImages), title);
                 const hasSgdb    = !!(sgdbImages?.cover || sgdbImages?.hero || sgdbImages?.logo);
                 const hasText    = _hasUsableTextMeta(meta);
 
@@ -390,7 +468,7 @@ async function resolveTransient(hints) {
                         sources:    hasSgdb ? ['igdb', 'steamgriddb'] : ['igdb'],
                         meta:       null,
                         debug: {
-                            selectedCandidate: gameData.name || null,
+                            selectedCandidate: gameData.title || null,  // normalized: .title not .name
                             margin:            50,
                             scoreBreakdown:    { directIdMatch: 50 },
                             allScores:         [],
@@ -408,7 +486,7 @@ async function resolveTransient(hints) {
                     sources:    ['igdb', hasSgdb ? 'steamgriddb' : null].filter(Boolean),
                     meta,
                     debug: {
-                        selectedCandidate: gameData.name || null,
+                        selectedCandidate: gameData.title || null,  // normalized: .title not .name
                         margin:            95,
                         scoreBreakdown:    { directIdMatch: 95 },
                         allScores:         [],
@@ -601,7 +679,32 @@ async function resolveTransient(hints) {
         DIAG_fetch_name_vs_search_name:   `"${fullGameData?.title ?? 'N/A'}" vs "${winnerRaw.name}"`,
     }, '[TransientResolver] DEBUG raw IGDB detail dump');
 
-    const gameDataToUse = fullGameData || winnerRaw;
+    // ── SCHEMA-AWARE META ASSEMBLY ─────────────────────────────────────────────
+    // fetchIgdbGameData() returns an already-normalized object — field names differ
+    // from raw IGDB wire format. Passing fullGameData into _normalizeMeta() causes
+    // every field lookup to silently return null/undefined:
+    //   _normalizeMeta reads:  g.name, g.summary, g.involved_companies, v.video_id
+    //   fullGameData has:      .title, .description, .developer/.publisher, v.url
+    //
+    // Contract enforced here:
+    //   fullGameData available → _mergeNormalizedWithSgdb()  (already normalized)
+    //   fullGameData missing   → _normalizeMeta(winnerRaw)   (raw IGDB wire object)
+    log.info({
+        requestId,
+        igdbId:                 winnerRaw.id,
+        fullGameData_available: igdbDetailFetchOk,
+        fullGameData_keys:      fullGameData ? Object.keys(fullGameData) : [],
+        has_name:               fullGameData ? ('name'               in fullGameData) : null,
+        has_title:              fullGameData ? ('title'              in fullGameData) : null,
+        has_summary:            fullGameData ? ('summary'            in fullGameData) : null,
+        has_description:        fullGameData ? ('description'        in fullGameData) : null,
+        has_involved_companies: fullGameData ? ('involved_companies' in fullGameData) : null,
+        has_publisher:          fullGameData ? ('publisher'          in fullGameData) : null,
+        videos_0_keys:          fullGameData?.videos?.[0] ? Object.keys(fullGameData.videos[0]) : [],
+        has_video_id_in_v0:     fullGameData ? ('video_id' in (fullGameData.videos?.[0] ?? {})) : null,
+        has_url_in_v0:          fullGameData ? ('url'      in (fullGameData.videos?.[0] ?? {})) : null,
+        path_chosen:            fullGameData ? '_mergeNormalizedWithSgdb(fullGameData)' : '_normalizeMeta(winnerRaw)',
+    }, '[TransientResolver] DEBUG schema inspection (search path)');
 
     // Fetch SteamGridDB images
     const sgdbImages = await resolveSgdbImages({
@@ -609,7 +712,12 @@ async function resolveTransient(hints) {
         title:  winnerRaw.name,
     }).catch(() => ({ cover: null, hero: null, logo: null }));
 
-    const meta = _sanitizePayload(_normalizeMeta(gameDataToUse, sgdbImages), title);
+    const meta = _sanitizePayload(
+        fullGameData
+            ? _mergeNormalizedWithSgdb(fullGameData, sgdbImages)  // already normalized by fetchIgdbGameData
+            : _normalizeMeta(winnerRaw, sgdbImages),              // raw wire object from _igdbSearch
+        title
+    );
 
     // ── DEBUG LOG 2: normalized meta values BEFORE the quality gate runs.
     //   These are the exact values _hasUsableTextMeta() will inspect.
