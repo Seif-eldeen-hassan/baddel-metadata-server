@@ -457,28 +457,15 @@ async function resolveTransient(hints) {
         try {
             const gameData = await fetchIgdbGameData(hints.igdbId);
             if (gameData) {
-                // ── SCHEMA GUARD ──────────────────────────────────────────────────────
-                // fetchIgdbGameData() returns an ALREADY-NORMALIZED object (not raw IGDB
-                // wire format). Passing it into _normalizeMeta() produces silent nulls:
-                //   g.name        → undefined (it's gameData.title)
-                //   g.summary     → undefined (it's gameData.description)
-                //   g.involved_companies → undefined (it's gameData.publisher/developer)
-                //   v.video_id    → undefined (videos are already {url, thumb, title})
-                // Fix: use _mergeNormalizedWithSgdb() which understands the normalized schema.
-                log.info({
+                // fetchIgdbGameData() returns an already-normalized object — use
+                // _mergeNormalizedWithSgdb() which understands the normalized schema.
+                log.debug({
                     requestId,
-                    igdbId:                 hints.igdbId,
-                    gameData_keys:          Object.keys(gameData),
-                    has_name:               'name'               in gameData,
-                    has_title:              'title'              in gameData,
-                    has_summary:            'summary'            in gameData,
-                    has_description:        'description'        in gameData,
-                    has_involved_companies: 'involved_companies' in gameData,
-                    has_publisher:          'publisher'          in gameData,
-                    videos_0_keys:          gameData.videos?.[0] ? Object.keys(gameData.videos[0]) : [],
-                    has_video_id_in_v0:     'video_id' in (gameData.videos?.[0] ?? {}),
-                    has_url_in_v0:          'url'      in (gameData.videos?.[0] ?? {}),
-                }, '[TransientResolver] DEBUG schema inspection (direct-ID path)');
+                    igdbId:      hints.igdbId,
+                    has_title:   'title'       in gameData,
+                    has_desc:    'description' in gameData,
+                    has_pub:     'publisher'   in gameData,
+                }, '[TransientResolver] direct-ID schema check');
 
                 const sgdbImages = await resolveSgdbImages({ igdbId: hints.igdbId, title }).catch(() => ({ cover: null, hero: null, logo: null }));
                 // fetchIgdbGameData already normalized — merge SGDB art, do NOT re-normalize
@@ -486,16 +473,7 @@ async function resolveTransient(hints) {
                 const hasSgdb    = !!(sgdbImages?.cover || sgdbImages?.hero || sgdbImages?.logo);
                 const hasText    = _hasUsableTextMeta(meta);
 
-                log.info({
-                    requestId,
-                    title,
-                    igdbId:          hints.igdbId,
-                    matchedTitle:    meta.title,
-                    igdbFetchOk:     true,
-                    hasText,
-                    isSgdbOnly:      !hasText && hasSgdb,
-                    hasSgdbArt:      hasSgdb,
-                }, '[TransientResolver] direct-ID detail');
+                log.info({ requestId, title, igdbId: hints.igdbId, matchedTitle: meta.title, hasText, hasSgdb }, '[TransientResolver] direct-ID detail');
 
                 // Direct ID path: still enforce text-metadata requirement
                 if (!hasText) {
@@ -662,102 +640,30 @@ async function resolveTransient(hints) {
         log.warn({ requestId, igdbId: winnerRaw.id, err: err.message }, '[TransientResolver] fetchIgdbGameData failed, using search result');
     }
 
-    // ── DEBUG LOG 1: raw field values from both the search object and the
-    //   detail fetch, printed as actual values so we can see exactly what
-    //   IGDB returned vs what fetchIgdbGameData shaped it into.
-    //
-    //   winnerRaw  = raw IGDB game object from _igdbSearch() — real wire format,
-    //                field names match the IGDB API directly (summary, storyline,
-    //                involved_companies, screenshots, videos, aggregated_rating…)
-    //
-    //   fullGameData = PRE-SHAPED return value of fetchIgdbGameData().
-    //                Field mapping inside fetchIgdbGameData (igdbResolver.js):
-    //                  g.name           → fullGameData.title          (NOT .name)
-    //                  g.summary        → fullGameData.description     (NOT .summary)
-    //                  g.storyline      → fullGameData.storyline
-    //                  involved_companies[0].company.name (developer:true)
-    //                                   → fullGameData.developer
-    //                  involved_companies[0].company.name (publisher:true)
-    //                                   → fullGameData.publisher
-    //                  g.genres[].name  → fullGameData.genres[]        (string array)
-    //                  g.aggregated_rating / g.rating
-    //                                   → fullGameData.ratings[]       (shaped array)
-    //                  g.screenshots[]  → fullGameData.images.screenshots[]
-    //                  g.videos[]       → fullGameData.videos[]
-    //
-    //   Key diagnostic:
-    //     If winnerRaw.summary != null  AND  fullGameData.description == null
-    //     → field-mapping bug in fetchIgdbGameData (Case B).
-    //     If both are null
-    //     → IGDB genuinely has no summary for this title (Case A).
-    //     If fullGameData.title != winnerRaw.name
-    //     → fetchIgdbGameData fetched a DIFFERENT record (Case C).
-    log.info({
+    // Compact debug snapshot — full wire dump available at log.debug level
+    log.debug({
         requestId,
-        // ── winnerRaw: raw IGDB search object ────────────────────────────────
-        winnerRaw_id:                     winnerRaw.id,
-        winnerRaw_name:                   winnerRaw.name,
-        winnerRaw_summary:                winnerRaw.summary                                                ?? null,
-        winnerRaw_storyline:              winnerRaw.storyline                                             ?? null,
-        winnerRaw_involved_companies_len: (winnerRaw.involved_companies || []).length,
-        winnerRaw_involved_companies:     (winnerRaw.involved_companies || []).map(ic => ({
-                                              name:      ic.company?.name ?? null,
-                                              developer: ic.developer     ?? false,
-                                              publisher: ic.publisher     ?? false,
-                                          })),
-        winnerRaw_screenshots_len:        (winnerRaw.screenshots || []).length,
-        winnerRaw_videos_len:             (winnerRaw.videos || []).length,
-        winnerRaw_videos_ids:             (winnerRaw.videos || []).map(v => v.video_id ?? null),
-        winnerRaw_aggregated_rating:      winnerRaw.aggregated_rating                                     ?? null,
-        winnerRaw_rating:                 winnerRaw.rating                                                ?? null,
-        winnerRaw_genres:                 (winnerRaw.genres || []).map(g => g?.name ?? g),
-        winnerRaw_category:               winnerRaw.category                                              ?? null,
-        // ── fullGameData: shaped return value of fetchIgdbGameData() ─────────
-        fetchOk:                          igdbDetailFetchOk,
-        fetch_title:                      fullGameData?.title                                             ?? null,
-        fetch_description:                fullGameData?.description                                       ?? null,
-        fetch_storyline:                  fullGameData?.storyline                                         ?? null,
-        fetch_developer:                  fullGameData?.developer                                         ?? null,
-        fetch_publisher:                  fullGameData?.publisher                                         ?? null,
-        fetch_genres:                     fullGameData?.genres                                            ?? null,
-        fetch_ratings:                    fullGameData?.ratings                                           ?? null,
-        fetch_screenshots_len:            (fullGameData?.images?.screenshots || []).length,
-        fetch_videos_len:                 (fullGameData?.videos || []).length,
-        fetch_videos_urls:                (fullGameData?.videos || []).map(v => v.url ?? null),
-        // ── Diagnostic flags ─────────────────────────────────────────────────
-        // Case B: IGDB search had summary but detail fetch lost it
-        DIAG_summary_lost_in_fetch:       !!(winnerRaw.summary && !fullGameData?.description),
-        // Case C: detail fetch returned a different game than the search winner
-        DIAG_record_mismatch:             igdbDetailFetchOk && fullGameData?.title !== winnerRaw.name,
-        DIAG_fetch_name_vs_search_name:   `"${fullGameData?.title ?? 'N/A'}" vs "${winnerRaw.name}"`,
-    }, '[TransientResolver] DEBUG raw IGDB detail dump');
+        winnerRaw_id:      winnerRaw.id,
+        winnerRaw_name:    winnerRaw.name,
+        winnerRaw_summary: winnerRaw.summary ?? null,
+        fetchOk:           igdbDetailFetchOk,
+        fetch_title:       fullGameData?.title ?? null,
+        fetch_description: fullGameData?.description ?? null,
+        DIAG_summary_lost: !!(winnerRaw.summary && !fullGameData?.description),
+        DIAG_mismatch:     igdbDetailFetchOk && fullGameData?.title !== winnerRaw.name,
+    }, '[TransientResolver] IGDB detail dump');
 
-    // ── SCHEMA-AWARE META ASSEMBLY ─────────────────────────────────────────────
     // fetchIgdbGameData() returns an already-normalized object — field names differ
-    // from raw IGDB wire format. Passing fullGameData into _normalizeMeta() causes
-    // every field lookup to silently return null/undefined:
-    //   _normalizeMeta reads:  g.name, g.summary, g.involved_companies, v.video_id
-    //   fullGameData has:      .title, .description, .developer/.publisher, v.url
-    //
-    // Contract enforced here:
+    // from raw IGDB wire format. Contract:
     //   fullGameData available → _mergeNormalizedWithSgdb()  (already normalized)
     //   fullGameData missing   → _normalizeMeta(winnerRaw)   (raw IGDB wire object)
-    log.info({
-        requestId,
-        igdbId:                 winnerRaw.id,
+    log.debug({
+        requestId, igdbId: winnerRaw.id,
         fullGameData_available: igdbDetailFetchOk,
-        fullGameData_keys:      fullGameData ? Object.keys(fullGameData) : [],
-        has_name:               fullGameData ? ('name'               in fullGameData) : null,
-        has_title:              fullGameData ? ('title'              in fullGameData) : null,
-        has_summary:            fullGameData ? ('summary'            in fullGameData) : null,
-        has_description:        fullGameData ? ('description'        in fullGameData) : null,
-        has_involved_companies: fullGameData ? ('involved_companies' in fullGameData) : null,
-        has_publisher:          fullGameData ? ('publisher'          in fullGameData) : null,
-        videos_0_keys:          fullGameData?.videos?.[0] ? Object.keys(fullGameData.videos[0]) : [],
-        has_video_id_in_v0:     fullGameData ? ('video_id' in (fullGameData.videos?.[0] ?? {})) : null,
-        has_url_in_v0:          fullGameData ? ('url'      in (fullGameData.videos?.[0] ?? {})) : null,
-        path_chosen:            fullGameData ? '_mergeNormalizedWithSgdb(fullGameData)' : '_normalizeMeta(winnerRaw)',
-    }, '[TransientResolver] DEBUG schema inspection (search path)');
+        has_title:              fullGameData ? ('title'       in fullGameData) : null,
+        has_description:        fullGameData ? ('description' in fullGameData) : null,
+        path_chosen:            fullGameData ? '_mergeNormalizedWithSgdb' : '_normalizeMeta',
+    }, '[TransientResolver] schema path selection');
 
     // Fetch SteamGridDB images
     const sgdbImages = await resolveSgdbImages({
@@ -772,36 +678,15 @@ async function resolveTransient(hints) {
         title
     );
 
-    // ── DEBUG LOG 2: normalized meta values BEFORE the quality gate runs.
-    //   These are the exact values _hasUsableTextMeta() will inspect.
-    //   Also logs every field the gate currently IGNORES so you can decide
-    //   whether the gate is too strict.
     const _hasTextDebug = _hasUsableTextMeta(meta);
-    log.info({
-        requestId,
-        igdbId:               winnerRaw.id,
-        // ── Fields _hasUsableTextMeta() CHECKS (any truthy → accepted) ───────
-        meta_title:           meta.title                                    ?? null,
-        meta_description:     meta.description                              ?? null,
-        meta_storyline:       meta.storyline                                ?? null,
-        meta_developer:       meta.developer                                ?? null,
-        meta_publisher:       meta.publisher                                ?? null,
-        meta_screenshots_len: (meta.images?.screenshots || []).length,
-        meta_videos_len:      (meta.videos || []).length,
-        hasUsableTextMeta:    _hasTextDebug,
-        // ── Fields the gate currently IGNORES ────────────────────────────────
-        meta_videos_urls:     (meta.videos || []).map(v => v.url ?? null),
-        meta_genres:          meta.genres                                   ?? null,
-        meta_ratings:         meta.ratings                                  ?? null,
-        meta_has_cover:       !!(meta.images?.cover?.url),
-        meta_has_hero:        !!(meta.images?.hero?.url),
-        meta_has_logo:        !!(meta.images?.logo?.url),
-        // ── One-line verdict ─────────────────────────────────────────────────
-        DIAG_non_text_igdb_signal_exists:
-            (meta.videos  || []).length > 0
-            || (meta.ratings || []).length > 0
-            || (meta.genres  || []).length > 0,
-    }, '[TransientResolver] DEBUG normalized meta pre-quality-gate');
+    log.debug({
+        requestId, igdbId: winnerRaw.id,
+        hasDescription: !!(meta.description || meta.storyline),
+        hasDeveloper:   !!meta.developer,
+        hasPublisher:   !!meta.publisher,
+        hasScreenshots: (meta.images?.screenshots?.length ?? 0) > 0,
+        hasUsableText:  _hasTextDebug,
+    }, '[TransientResolver] pre-quality-gate meta check');
     const hasSgdb = !!(sgdbImages?.cover || sgdbImages?.hero || sgdbImages?.logo);
     const hasText = _hasUsableTextMeta(meta);
 

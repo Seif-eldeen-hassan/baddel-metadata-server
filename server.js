@@ -300,7 +300,29 @@ app.get('/jobs/enrich', requireAuth, adminLimiter, async (req, res, next) => {
 });
 
 // ─── SSE (DB-backed polling — works across multiple instances) ─────────────────
+//
+// Connection limit: each open SSE client polls the DB every 2 s.
+// Without a cap, a burst of launcher instances can generate hundreds of
+// concurrent DB queries.  We allow at most SSE_MAX_CONNECTIONS simultaneous
+// streams; callers above the limit receive 503 and should fall back to polling
+// the REST endpoints.
+//
+const SSE_MAX_CONNECTIONS = Number(process.env.SSE_MAX_CONNECTIONS) || 50;
+let   _sseActiveCount     = 0;
+
 app.get('/games/enrich-stream', requireAuth, async (req, res) => {
+    if (_sseActiveCount >= SSE_MAX_CONNECTIONS) {
+        log.warn({ active: _sseActiveCount, limit: SSE_MAX_CONNECTIONS }, '[SSE] connection limit reached');
+        return res.status(503).json({
+            status:  'error',
+            message: 'SSE connection limit reached — use REST polling instead',
+            retryAfterSeconds: 5,
+        });
+    }
+
+    _sseActiveCount++;
+    log.info({ active: _sseActiveCount }, '[SSE] client connected');
+
     const { gameId } = req.query;
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -332,7 +354,12 @@ app.get('/games/enrich-stream', requireAuth, async (req, res) => {
 
     const pollTimer = setInterval(poll, 2000);
     const heartbeat = setInterval(() => { try { res.write(':ping\n\n'); } catch { clearInterval(heartbeat); } }, 25000);
-    req.on('close', () => { clearInterval(pollTimer); clearInterval(heartbeat); });
+    req.on('close', () => {
+        clearInterval(pollTimer);
+        clearInterval(heartbeat);
+        _sseActiveCount--;
+        log.info({ active: _sseActiveCount }, '[SSE] client disconnected');
+    });
     await poll();
 });
 

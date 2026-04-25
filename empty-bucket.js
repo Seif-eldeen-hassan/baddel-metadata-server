@@ -1,53 +1,85 @@
+/**
+ * empty-bucket.js — DESTRUCTIVE MAINTENANCE SCRIPT
+ *
+ * Deletes every object in the R2 bucket.
+ * ⚠️  This is irreversible. Run only when you intend to wipe all stored images.
+ *
+ * Usage (must pass the explicit --confirm flag):
+ *   node empty-bucket.js --confirm
+ *
+ * The --confirm flag is a deliberate friction point so the script can NEVER be
+ * run accidentally (e.g. via `node .`, a misconfigured cron, or a typo).
+ */
+
+'use strict';
+
+// ─── Safety gate — must be the very first thing that runs ────────────────────
+if (!process.argv.includes('--confirm')) {
+    console.error('');
+    console.error('⛔  SAFETY GATE: This script deletes the entire R2 bucket.');
+    console.error('    You must pass --confirm to proceed:');
+    console.error('');
+    console.error('      node empty-bucket.js --confirm');
+    console.error('');
+    process.exit(1);
+}
+
 require('dotenv').config();
+
 const { S3Client, ListObjectsV2Command, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
 
+// ─── Validate required env vars before doing anything ────────────────────────
+const REQUIRED = ['S3_API', 'R2_ACCESS_KEY', 'R2_SECRET_KEY'];
+const missing  = REQUIRED.filter(k => !process.env[k]);
+if (missing.length) {
+    console.error('❌  Missing env vars:', missing.join(', '));
+    process.exit(1);
+}
+
 const r2 = new S3Client({
-    region: 'auto',
-    endpoint: process.env.S3_API,
+    region:      'auto',
+    endpoint:    process.env.S3_API,
     credentials: {
-        accessKeyId: process.env.Access_Key,
-        secretAccessKey: process.env.Secret_Access_Key,
+        accessKeyId:     process.env.R2_ACCESS_KEY,
+        secretAccessKey: process.env.R2_SECRET_KEY,
     },
 });
 
 const BUCKET = 'baddel-media';
 
 async function emptyBucket() {
-    let isTruncated = true;
+    let isTruncated       = true;
     let continuationToken = undefined;
-    let totalDeleted = 0;
+    let totalDeleted      = 0;
 
-    console.log(`🗑️ جاري تفريغ الـ Bucket: ${BUCKET}...`);
+    console.log(`\n🗑️  Emptying bucket: ${BUCKET} …\n`);
 
     while (isTruncated) {
-        // 1. جلب دفعة من الملفات (أقصى حاجة 1000 في الطلب الواحد)
         const listRes = await r2.send(new ListObjectsV2Command({
             Bucket: BUCKET,
             ContinuationToken: continuationToken,
         }));
 
-        if (!listRes.Contents || listRes.Contents.length === 0) {
-            break;
-        }
+        if (!listRes.Contents?.length) break;
 
-        // 2. تجهيز الملفات للمسح
         const objectsToDelete = listRes.Contents.map(obj => ({ Key: obj.Key }));
 
-        // 3. مسح الدفعة
         await r2.send(new DeleteObjectsCommand({
             Bucket: BUCKET,
-            Delete: { Objects: objectsToDelete }
+            Delete: { Objects: objectsToDelete },
         }));
 
         totalDeleted += objectsToDelete.length;
-        console.log(`✅ تم مسح ${totalDeleted} ملف...`);
+        console.log(`  ✅  Deleted ${totalDeleted} objects so far …`);
 
-        // 4. التحقق إذا كان في ملفات تانية لسه متمسحتش
-        isTruncated = listRes.IsTruncated;
+        isTruncated       = listRes.IsTruncated;
         continuationToken = listRes.NextContinuationToken;
     }
 
-    console.log('🎉 الـ Bucket بقى فاضي تماماً وتقدر تمسحه من الداشبورد دلوقتي لو عايز (أو تسيبه زي ما هو وتستخدمه من جديد).');
+    console.log(`\n🎉  Done. ${totalDeleted} objects deleted from "${BUCKET}".\n`);
 }
 
-emptyBucket().catch(console.error);
+emptyBucket().catch((err) => {
+    console.error('❌  Fatal error:', err.message);
+    process.exit(1);
+});

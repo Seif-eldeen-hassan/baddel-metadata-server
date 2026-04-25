@@ -607,6 +607,14 @@ async function enrichGamesBatch(items) {
     })();
 
     const consumer = (async () => {
+        // ── Intentionally sequential (single-threaded) ──────────────────────────
+        // _saveRawUrls() opens a DB transaction that touches 6+ tables plus an
+        // optional image fetch.  Running multiple saves in parallel would multiply
+        // DB connection usage and can cause lock contention on the game_images
+        // partial unique index.  The producer already saturates external APIs at
+        // LOOKUP_CONCURRENCY; the save phase is the intentional throttle point
+        // that keeps peak DB connections predictable.
+        // ────────────────────────────────────────────────────────────────────────
         let processed = 0;
         while (true) {
             if (buffer.length === 0) {

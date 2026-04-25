@@ -5,7 +5,13 @@
  * Upload images to Cloudflare R2.
  * All fetching goes through safeFetch() which enforces:
  *   HTTPS-only, allowlist, DNS/private-IP check, hop-by-hop redirect validation,
- *   image content-type, 10MB size, 15s timeout.
+ *   image content-type, 10 MB size, 15 s timeout.
+ *
+ * R2 env vars (canonical names — legacy names are shimmed in config/env.js):
+ *   S3_API          — R2 S3-compatible endpoint
+ *   R2_ACCESS_KEY   — access key  (was: Access_Key)
+ *   R2_SECRET_KEY   — secret key  (was: Secret_Access_Key)
+ *   R2_PUBLIC_URL   — public CDN base URL  (was: Public_Development_URL)
  */
 
 const { S3Client, PutObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
@@ -19,18 +25,23 @@ try { sharp = require('sharp'); sharp.cache(false); sharp.concurrency(1); }
 catch { sharp = null; }
 
 let _r2 = null;
+
 function getR2() {
     if (_r2) return _r2;
     if (!isR2Configured()) throw new Error('R2 not configured');
     _r2 = new S3Client({
-        region: 'auto', endpoint: process.env.S3_API,
-        credentials: { accessKeyId: process.env.Access_Key, secretAccessKey: process.env.Secret_Access_Key },
+        region:      'auto',
+        endpoint:    process.env.S3_API,
+        credentials: {
+            accessKeyId:     process.env.R2_ACCESS_KEY,
+            secretAccessKey: process.env.R2_SECRET_KEY,
+        },
     });
     return _r2;
 }
 
 const BUCKET      = 'baddel-media';
-const PUBLIC_BASE = () => process.env.Public_Development_URL;
+const PUBLIC_BASE = () => process.env.R2_PUBLIC_URL;
 const MAX_BYTES   = 10 * 1024 * 1024;
 
 // ─── Key generation ───────────────────────────────────────────────────────────
@@ -90,7 +101,12 @@ async function uploadImageToR2(imageUrl, key) {
     } finally { originalBuffer = null; }
 
     try {
-        await getR2().send(new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: webpBuffer, ContentType: 'image/webp' }));
+        await getR2().send(new PutObjectCommand({
+            Bucket:      BUCKET,
+            Key:         key,
+            Body:        webpBuffer,
+            ContentType: 'image/webp',
+        }));
         webpBuffer = null;
         return `${PUBLIC_BASE()}/${key}`;
     } catch (err) {
