@@ -32,8 +32,8 @@ enrichEmitter.setMaxListeners(100);
 // ─── Pipeline tunables ────────────────────────────────────────────────────────
 const LOOKUP_CONCURRENCY = 3;
 const BUFFER_MAX         = 15;
-const PROMOTE_BATCH_SIZE = 5;
-const PROMOTE_DELAY_MS   = 500;
+const PROMOTE_BATCH_SIZE = Number(process.env.PROMOTE_BATCH_SIZE || 1);
+const PROMOTE_DELAY_MS   = Number(process.env.PROMOTE_DELAY_MS || 1500);
 
 // ─── Steam cover validation ────────────────────────────────────────────────────
 async function getValidSteamCover(url) {
