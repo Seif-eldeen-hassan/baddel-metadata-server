@@ -736,7 +736,10 @@ app.post('/games/enrich', requireAuth, adminLimiter, validateEnrichBatch, async 
 app.post('/jobs/promote-images', requireCronSecret, validatePromoteImages, async (req, res) => {
     res.status(202).json({ status: 'accepted', message: 'Image promotion started' });
     const limit = Number(req.body?.limit) || 500;
-    promotePendingImages(limit).then(r => log.info(r, '[Cron] done')).catch(err => log.error({ err: err.message }, '[Cron] error'));
+    promotePendingImages(limit).then(r => log.info(r, '[Cron] done')).catch(err => log.error({
+  error: err.message,
+  stack: err.stack
+}, '[Cron] error'));
 });
 
 app.get('/jobs/promote-images/status', requireAuth, adminLimiter, async (req, res, next) => {

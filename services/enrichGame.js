@@ -656,7 +656,7 @@ async function promotePendingImages(limit = 500) {
         `SELECT id, game_id, source, image_type, url
          FROM game_images
          WHERE cdn_url IS NULL AND url IS NOT NULL
-         ORDER BY created_at ASC
+         ORDER BY id ASC
          LIMIT $1`,
         [limit]
     );
