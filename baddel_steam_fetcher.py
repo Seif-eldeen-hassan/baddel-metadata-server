@@ -48,7 +48,14 @@ def clean_description(raw_html):
 
 def get_steam_game_standardized(app_id):
     details_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&l=english"
-    reviews_url = f"https://store.steampowered.com/appreviews/{app_id}?json=1&language=all"
+
+    # FIX: use purchase_type=all + num_per_page=0 to get ALL-TIME totals.
+    # The old URL (?language=all) returns only *recent* reviews — that's why
+    # Apex showed 1,575 instead of 440,231 and Aimlabs showed 261 instead of 65,201.
+    reviews_url = (
+        f"https://store.steampowered.com/appreviews/{app_id}"
+        f"?json=1&language=all&purchase_type=all&num_per_page=0"
+    )
 
     try:
         # ── Details request ──────────────────────────────────────────────────
@@ -63,7 +70,6 @@ def get_steam_game_standardized(app_id):
 
         details_res = details_raw.json()
 
-        # FIX 1: Safely guard against `details_res` evaluating to None
         if not details_res or str(app_id) not in details_res or not details_res[str(app_id)].get('success'):
             print(json.dumps({"error": "Invalid AppID, geo-blocked, or game unavailable"}))
             return
@@ -76,8 +82,7 @@ def get_steam_game_standardized(app_id):
         # ── Reviews request ──────────────────────────────────────────────────
         reviews_raw = requests.get(reviews_url, timeout=15)
         reviews_res = reviews_raw.json() if 'application/json' in reviews_raw.headers.get('Content-Type', '') else {}
-        
-        # FIX 2: Guard against reviews_res being None
+
         reviews_data = reviews_res.get('query_summary', {}) if reviews_res else {}
 
         # ── Parse fields ─────────────────────────────────────────────────────
@@ -91,7 +96,6 @@ def get_steam_game_standardized(app_id):
         languages_clean = clean_html(languages_raw).replace('*', '')
 
         trailers = []
-        # FIX 3: Use `or []` to ensure None is converted to an empty array before iteration
         for movie in (data.get('movies') or []):
             video_url = movie.get('dash_h264', '') or movie.get('mp4', {}).get('max', movie.get('webm', {}).get('max', ''))
             trailers.append({"video": video_url, "thumbnail": movie.get('thumbnail', '')})
@@ -140,16 +144,15 @@ def get_steam_game_standardized(app_id):
             "screenshots": screenshots,
             "steam_reviews": {
                 "review_score_desc": reviews_data.get('review_score_desc', 'No Reviews'),
-                "total_reviews": reviews_data.get('total_reviews', 0),
-                "positive_reviews": reviews_data.get('total_positive', 0),
-                "negative_reviews": reviews_data.get('total_negative', 0)
+                "total_reviews":     reviews_data.get('total_reviews', 0),
+                "positive_reviews":  reviews_data.get('total_positive', 0),
+                "negative_reviews":  reviews_data.get('total_negative', 0)
             }
         }
 
         print(json.dumps(baddel_format, ensure_ascii=False))
 
     except Exception as e:
-        # Returning standard error JSON, but printing traceback inside Python for deeper debugging if it happens again
         import traceback
         print(json.dumps({"error": str(e), "trace": traceback.format_exc()}))
 
