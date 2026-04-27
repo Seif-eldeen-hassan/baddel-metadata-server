@@ -1,0 +1,80 @@
+{
+    "source": "steam_store",
+    "source_appid": "12120",
+    "title": "Grand Theft Auto: San Andreas",
+    "type": "game",
+    "short_description": "Five years ago Carl Johnson escaped from the pressures of life in Los Santos, San Andreas... a city tearing itself apart with gang trouble, drugs and corruption. Where filmstars and millionaires do their best to avoid the dealers and gangbangers. Now, it's the early 90s. Carl's got to go home.",
+    "description": "Five years ago Carl Johnson escaped from the pressures of life in Los Santos, San Andreas... a city tearing itself apart with gang trouble, drugs and corruption. Where filmstars and millionaires do their best to avoid the dealers and gangbangers. \n\nNow, it's the early 90s. Carl's got to go home. His mother has been murdered, his family has fallen apart and his childhood friends are all heading towards disaster. \n\nOn his return to the neighborhood, a couple of corrupt cops frame him for homicide. CJ is forced on a journey that takes him across the entire state of San Andreas, to save his family and to take control of the streets.",
+    "rating": {
+        "score": 93,
+        "max_score": 100,
+        "source": "Metacritic"
+    },
+    "release_date": "Jan 4, 2008",
+    "release_year": "2008",
+    "developer": [
+        "Rockstar Games"
+    ],
+    "publisher": [
+        "Rockstar Games"
+    ],
+    "platform": [
+        "Windows"
+    ],
+    "genres": [
+        "Action"
+    ],
+    "features": [
+        "Single-player",
+        "Family Sharing"
+    ],
+    "requirements": {
+        "languages": [
+            "English"
+        ],
+        "systems": {
+            "Windows": {
+                "minimum": {
+                    "Processor": "1Ghz Pentium III or AMD Athlon Processor",
+                    "Memory": "256MB of",
+                    "Graphics": "64MB Video Card (Geforce 3 or better)",
+                    "Storage": "3.6GB of free hard disk space (minimal install)"
+                },
+                "minimum_raw": "Minimum:\nOS *: Microsoft® Windows® 2000/XP\n\nProcessor: 1Ghz Pentium III or AMD Athlon Processor\n\nMemory: 256MB of RAM\n\nGraphics: 64MB Video Card (Geforce 3 or better)\n\nHard Drive: 3.6GB of free hard disk space (minimal install)\n\nOther Requirements: Software installations required including DirectX and Sony DADC SecuROM\n\nPartner Requirements: Please check the terms of service of this site before purchasing this software.",
+                "recommended": {
+                    "Processor": "Intel Pentium 4 or AMD Athlon XP Processor",
+                    "Memory": "384MB of (the more the better!)",
+                    "Graphics": "128MB (or greater) Video Card (Geforce 6 Series Recommended)",
+                    "Storage": "4.7GB of free hard disk space (full install)",
+                    "Sound Card": "DirectX 9 compatible Sound Card (Sound Blaster Auidgy 2 Recommended)"
+                },
+                "recommended_raw": "Recommended:\nProcessor: Intel Pentium 4 or AMD Athlon XP Processor\n\nMemory: 384MB of RAM (the more the better!)\n\nGraphics: 128MB (or greater) Video Card (Geforce 6 Series Recommended)\n\nHard Drive: 4.7GB of free hard disk space (full install)\n\nSound Card: DirectX 9 compatible Sound Card (Sound Blaster Auidgy 2 Recommended)"
+            }
+        }
+    },
+    "poster": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/library_600x900_2x.jpg",
+    "header_image": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/header.jpg?t=1634144450",
+    "capsule_image": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/capsule_231x87.jpg?t=1634144450",
+    "capsule_imagev5": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/capsule_184x69.jpg?t=1634144450",
+    "background": "https://store.akamai.steamstatic.com/images/storepagebackground/app/12120?t=1634144450",
+    "logo": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/logo.png",
+    "trailers": [],
+    "screenshots": [
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003303.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003304.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003305.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003306.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003307.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003308.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003309.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003310.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003311.1920x1080.jpg?t=1634144450",
+        "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/12120/0000003312.1920x1080.jpg?t=1634144450"
+    ],
+    "steam_reviews": {
+        "review_score_desc": "Very Positive",
+        "total_reviews": 83005,
+        "positive_reviews": 76412,
+        "negative_reviews": 6593
+    }
+}
