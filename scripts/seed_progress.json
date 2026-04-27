@@ -1,0 +1,412 @@
+{
+  "doneBatches": {
+    "0": {
+      "at": "2026-04-27T03:40:39.001Z",
+      "queuedCount": 179,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 21,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "1": {
+      "at": "2026-04-27T03:41:23.339Z",
+      "queuedCount": 178,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 22,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "2": {
+      "at": "2026-04-27T03:42:07.931Z",
+      "queuedCount": 177,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 23,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "3": {
+      "at": "2026-04-27T03:42:52.078Z",
+      "queuedCount": 167,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 33,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "4": {
+      "at": "2026-04-27T03:43:36.193Z",
+      "queuedCount": 171,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 29,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "5": {
+      "at": "2026-04-27T03:44:21.231Z",
+      "queuedCount": 197,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 3,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "6": {
+      "at": "2026-04-27T03:45:06.411Z",
+      "queuedCount": 195,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 5,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "7": {
+      "at": "2026-04-27T03:45:51.441Z",
+      "queuedCount": 192,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 8,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "8": {
+      "at": "2026-04-27T03:46:36.542Z",
+      "queuedCount": 195,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 5,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "9": {
+      "at": "2026-04-27T03:47:21.470Z",
+      "queuedCount": 193,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 7,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "10": {
+      "at": "2026-04-27T03:48:06.827Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "11": {
+      "at": "2026-04-27T03:48:51.939Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "12": {
+      "at": "2026-04-27T03:49:37.159Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "13": {
+      "at": "2026-04-27T03:50:22.335Z",
+      "queuedCount": 198,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 2,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "14": {
+      "at": "2026-04-27T03:51:07.607Z",
+      "queuedCount": 197,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 3,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "15": {
+      "at": "2026-04-27T03:51:52.874Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "16": {
+      "at": "2026-04-27T03:52:38.380Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "17": {
+      "at": "2026-04-27T03:53:23.692Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "18": {
+      "at": "2026-04-27T03:54:08.832Z",
+      "queuedCount": 198,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 2,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "19": {
+      "at": "2026-04-27T03:54:54.006Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "20": {
+      "at": "2026-04-27T03:55:39.102Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "21": {
+      "at": "2026-04-27T03:56:24.325Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "22": {
+      "at": "2026-04-27T03:57:09.524Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "23": {
+      "at": "2026-04-27T03:57:54.868Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "24": {
+      "at": "2026-04-27T03:58:40.288Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "25": {
+      "at": "2026-04-27T03:59:25.527Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "26": {
+      "at": "2026-04-27T04:00:10.978Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "27": {
+      "at": "2026-04-27T04:00:56.254Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "28": {
+      "at": "2026-04-27T04:01:41.499Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "29": {
+      "at": "2026-04-27T04:02:26.597Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "30": {
+      "at": "2026-04-27T04:03:12.798Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "31": {
+      "at": "2026-04-27T04:03:58.189Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "32": {
+      "at": "2026-04-27T04:04:43.523Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "33": {
+      "at": "2026-04-27T04:05:29.013Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "34": {
+      "at": "2026-04-27T04:06:19.340Z",
+      "queuedCount": 198,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 2,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "35": {
+      "at": "2026-04-27T04:07:04.278Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "36": {
+      "at": "2026-04-27T04:07:48.944Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "37": {
+      "at": "2026-04-27T04:08:34.159Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "38": {
+      "at": "2026-04-27T04:09:19.411Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "39": {
+      "at": "2026-04-27T04:10:04.518Z",
+      "queuedCount": 198,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 2,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "40": {
+      "at": "2026-04-27T04:10:49.620Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "41": {
+      "at": "2026-04-27T04:11:35.099Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "42": {
+      "at": "2026-04-27T04:12:20.395Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "43": {
+      "at": "2026-04-27T04:13:05.682Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "44": {
+      "at": "2026-04-27T04:13:50.969Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "45": {
+      "at": "2026-04-27T04:14:36.009Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "46": {
+      "at": "2026-04-27T04:15:21.514Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "47": {
+      "at": "2026-04-27T04:16:06.884Z",
+      "queuedCount": 199,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "48": {
+      "at": "2026-04-27T04:16:52.231Z",
+      "queuedCount": 200,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 0,
+      "invalidCount": 0,
+      "errorCount": 0
+    },
+    "49": {
+      "at": "2026-04-27T04:17:32.910Z",
+      "queuedCount": 128,
+      "alreadyQueuedCount": 0,
+      "alreadyExistsCount": 1,
+      "invalidCount": 0,
+      "errorCount": 0
+    }
+  },
+  "totals": {
+    "submitted": 9929,
+    "queued": 9743,
+    "alreadyQueued": 0,
+    "alreadyExists": 186,
+    "invalid": 0,
+    "error": 0
+  }
+}
